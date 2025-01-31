@@ -2,6 +2,7 @@ import torch
 from torch import nn
 
 
+
 class VisionTransformer(nn.Module):
     def __init__(self, depth, patch_size, channels, height, width, emb_dim=128):
         super().__init__()
@@ -21,6 +22,8 @@ class VisionTransformer(nn.Module):
                 Transformer(emb_dim, 2),
                 MLP(emb_dim)
             ]))
+
+        self.mlp = MLP(emb_dim, out_features=3 * patch_size**2)
 
     # 1, 3, 16, 16 = x
     def forward(self, x):
@@ -42,9 +45,9 @@ class VisionTransformer(nn.Module):
             x = transformer(x) + x
             x = mlp(x) + x
 
-
-        # TODO need to reconstruct image
-        x = x[:, 1:].reshape(B, C, H, W)
+        # remove class head and decode the embedding
+        x = self.mlp(x[:, 1:])
+        x = x.view(B, C, H, W)
 
         return x
 
@@ -77,10 +80,10 @@ class Transformer(nn.Module):
         q, k, v = qkv.chunk(3, dim=-1)
 
         # scaled dot product
-        y = nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+        y = nn.functional.scaled_dot_product_attention(q, k, v)
 
         # out projection, residual, and norm
-        y = y.reshape(B, T, D) + 1
+        y = y.reshape(B, T, D)
         y = self.out_proj(y) + x
         y = self.ln2(y)
 
