@@ -6,20 +6,32 @@ import torch.nn.functional as F
 
 # https://arxiv.org/pdf/2409.03516
 
-class ViTBlock(nn.Module):
-    def __init__(self, depth, window_size, patch_size, channels, height, width, dim=128):
+class CCM(nn.Module):
+    def __init__(self, dim, growth_rate=2.0):
         super().__init__()
-        self.depth = depth
-        self.patch_size = patch_size
-        self.channels = channels
-        self.height = height
-        self.width = width
-        self.num_patches = height*width // patch_size**2
+        hidden_dim = int(dim * growth_rate)
 
+        self.ccm = nn.Sequential(
+            nn.Conv2d(dim, hidden_dim, 3, 1, 1),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, dim, 1, 1, 0)
+        )
+
+    # B, H, W, C - input and output
+    def forward(self, x):
+        B, H, W, C = x.size()
+        x = x.view(B, C, H, W)
+        x = self.ccm(x)
+        x = x.view(B, H, W, C)
+        return x
+
+class ViTBlock(nn.Module):
+    def __init__(self, window_size, dim):
+        super().__init__()
         self.window_size = window_size
         self.dim = dim
-        self.qkv = nn.Linear(dim, 3*dim)
 
+        self.qkv = nn.Linear(dim, 3*dim)
         self.pe_encoder = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim)
         self.out_proj = nn.Linear(dim, dim)
 
@@ -30,15 +42,15 @@ class ViTBlock(nn.Module):
         # B, n_h_windows, window size, n_w_windows, window size, C -> B, n_h_windows, n_w_windows, window size, window size, C
         # then merge batch and number of windows
         x = x.view(B, H // self.window_size, self.window_size, W // self.window_size, self.window_size, C)
-        x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, self.window_size, self.window_size, C)
-        x = x.view(-1, self.window_size * self.window_size, C)      # probably not needed extra step
+        x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
+        x = x.view(-1, self.window_size * self.window_size, C)
         return x
 
     # input: N, window_size^2, C
     # output: B, C, H, W
     def reverse_window_partition(self, x, h, w):
         # inverse of window create
-        b = x.shape[0] // (w * h // self.window_size // self.window_size)
+        b = x.shape[0] // ((w // self.window_size) * (h // self.window_size))
         x = x.view(b, self.window_size, self.window_size, -1)
         x = x.view(b, h // self.window_size, w//self.window_size, self.window_size, self.window_size, -1)
         return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(b, -1, h, w)
@@ -48,7 +60,9 @@ class ViTBlock(nn.Module):
         N, win_size_sq, C = x.shape
 
         # converting into spatial form: N, window_size^2, C -> B, C, window_size, window_size
-        x = x.view(N, C, self.window_size, self.window_size)
+        x = x.reshape(N, C, self.window_size, self.window_size)
+
+        # find spatial encodings for each window
         lepe = func(x)
 
         # converting into back into image with: B, C, H, W -> N, W^2, C
@@ -62,36 +76,38 @@ class ViTBlock(nn.Module):
 
         # convert to windows
         # B, C, H, W -> N, window_size^2, C
-        y = self.window_partition(x)
+        x = self.window_partition(x)
 
         # q,k,v: N, window_size^2, C
-        qkv = self.qkv(y)
+        qkv = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
 
-        # attention
-        y = nn.functional.scaled_dot_product_attention(q, k, v)
+        # attention and apply positional encoding
+        lepe = self.locally_enhanced_pe(v, self.pe_encoder)
+        x = nn.functional.scaled_dot_product_attention(q, k, v)
+        x += lepe
 
-        # positional encoding
-        y += self.locally_enhanced_pe(v, self.pe_encoder, H, W)
+        x = self.out_proj(x)
+        x = self.reverse_window_partition(x, H, W)
 
-        y = self.out_proj(y)
-        y = self.reverse_window_partition(y, H, W)
+        return x
 
-        return y
-
-
-class HLMTBlock(nn.Module):
-    def __init__(self, levels):
+class LHSABlock(nn.Module):
+    def __init__(self, levels, window_size, dim):
         super().__init__()
         self.levels = levels
+        self.dim = dim
 
-        self.vit = nn.ModuleList([])
+        self.vit = nn.ModuleList([*[ViTBlock(window_size, dim // levels) for _ in range(levels)]])
+        self.aggr = nn.Conv2d(dim, dim, 1, 1, 0)
 
         self.activation = nn.GELU()
 
-        # passing in B, C, H, W
+    # passing in B, H, W, C
+    # returning  B, H, W, C
     def forward(self, x):
-        B, C, H, W = x.size()
+        B, H, W, C = x.size()
+        x = x.view(B, C, H, W)
 
         # we chunk the features into levels
         x_chunked = x.chunk(self.levels, dim=1)
@@ -118,7 +134,7 @@ class HLMTBlock(nn.Module):
 
             # adding elementwise the up-sampled feature map for increased detail
             if i > 0:
-                downsampled_maps[i-1] += z_up
+                downsampled_maps[i-1] = downsampled_maps[i-1] + z_up
 
             # interpolating image back to original H*W feature map size and returning
             z = F.interpolate(z_up, size=(H, W), mode='nearest')
@@ -130,42 +146,65 @@ class HLMTBlock(nn.Module):
         # multiplicative residual connection for less dependency on original.
         out_maps = self.activation(out_maps) * x
 
+        # returns to B,C,H,W -> B, H, W, C
+        out_maps = out_maps.view(B, H, W, C)
+
         return out_maps
 
+class LMLTBlock(nn.Module):
+    def __init__(self, levels, window_size, dim, ffn_scale=2.0):
+        super().__init__()
+        self.LHSA = LHSABlock(levels=levels, dim=dim, window_size=window_size)
+        self.CCM = CCM(dim, ffn_scale)
+        self.ln1 = nn.LayerNorm(dim)
+        self.ln2 = nn.LayerNorm(dim)
+
+    def forward(self, x):
+        x = self.LHSA(self.ln1(x)) + x
+        x = self.CCM(self.ln2(x)) + x
+        return x
 
 class LMLTransformer(nn.Module):
-    def __init__(self, dim, depth, patch_size, channels, height, width, emb_dim=128):
+    def __init__(self, n_blocks, levels, window_size, dim, scale_factor, ffn_scale=2.0):
         super().__init__()
-        self.depth = depth
-        self.patch_size = patch_size
-        self.channels = channels
-        self.height = height
-        self.width = width
-        self.num_patches = height * width // patch_size ** 2
-
-        self.patch_emb = nn.Linear(patch_size ** 2 * channels, emb_dim)
-        self.class_tokens = nn.Parameter(torch.randn(1, 1, emb_dim))
-
-        self.layers = nn.ModuleList([])
-        for _ in range(depth):
-            self.layers.append(nn.ModuleList([
-                Transformer(emb_dim, 2),
-                MLP(emb_dim)
-            ]))
-
-        self.mlp = MLP(emb_dim, out_features=3 * patch_size ** 2)
+        self.depth = n_blocks
+        self.LHSA_levels = levels
+        self.dim = dim
+        self.scale_factor = scale_factor
 
         self.feature_extractor = nn.Conv2d(3, dim, 3, 1, 1)
+
+        self.layers = nn.Sequential(*[LMLTBlock(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale) for _ in range(n_blocks)])
+
+        # convert from dim -> color scale * img scale factor and uses pixel shuffle to organize image
+        self.img_reconstruction = nn.Sequential(
+            nn.Conv2d(dim, 3 * scale_factor**2, 3, 1, 1),
+            nn.PixelShuffle(scale_factor)
+        )
 
     # 1, 3, 16, 16 = x
     def forward(self, x):
         B, C, H, W = x.shape
 
-        # B, emb_dim, H, W
+        # B, dim, H, W,
         x = self.feature_extractor(x)
+        x = x.view(B, H, W, self.dim)
+
+        x = self.layers(x) + x
+
+        x = x.view(B, self.dim, H, W)
+        x = self.img_reconstruction(x)
 
         return x
 
+
+if __name__== '__main__':
+    x = torch.randn(2, 3, 64, 64)
+    model = LMLTransformer(n_blocks=8, levels=4, dim=36, window_size=8, scale_factor=4)
+    print(model)
+    print(f'params: {sum(map(lambda x: x.numel(), model.parameters()))}')
+    output = model(x)
+    print(output.shape)
 
 #vit = VisionTransformer(4, 4, 3, 32, 32)
 # t = Transformer(4)
