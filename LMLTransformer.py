@@ -186,6 +186,8 @@ class LMLTransformer(nn.Module):
     def forward(self, x):
         B, C, H, W = x.shape
 
+        # TODO add image padding
+
         # B, dim, H, W,
         x = self.feature_extractor(x)
         x = x.view(B, H, W, self.dim)
@@ -199,7 +201,7 @@ class LMLTransformer(nn.Module):
 
 
 if __name__== '__main__':
-    x = torch.randn(2, 3, 320, 180)
+    x = torch.randn(2, 3, 1920, 1080)
     model = LMLTransformer(n_blocks=8, levels=2, dim=36, window_size=8, scale_factor=4)
     print(model)
     print(f'params: {sum(map(lambda x: x.numel(), model.parameters()))}')
