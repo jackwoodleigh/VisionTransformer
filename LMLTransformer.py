@@ -199,12 +199,14 @@ class LMLTransformer(nn.Module):
 
 
 if __name__== '__main__':
-    x = torch.randn(2, 3, 64, 64)
-    model = LMLTransformer(n_blocks=8, levels=4, dim=36, window_size=8, scale_factor=4)
+    x = torch.randn(2, 3, 320, 180)
+    model = LMLTransformer(n_blocks=8, levels=2, dim=36, window_size=8, scale_factor=4)
     print(model)
     print(f'params: {sum(map(lambda x: x.numel(), model.parameters()))}')
     output = model(x)
     print(output.shape)
+
+
 
 #vit = VisionTransformer(4, 4, 3, 32, 32)
 # t = Transformer(4)

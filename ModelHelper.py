@@ -1,21 +1,32 @@
 import torch
+import wandb
+from tqdm import tqdm
+import torchvision.models as models
+import torch
+from torch import nn
+
+class PerceptualLoss(nn.Module):
+    def __init__(self, layer_index=16):
+        super().__init__()
+        vgg = models.vgg19(pretrained=True).features
+        self.features = nn.Sequential(*list(vgg.children())[:layer_index])
+    def forward(self, predicted, target):
+        predicted_features = self.features(predicted)
+        target_features = self.features(target)
+        return nn.MSELoss(predicted_features, target_features)
 
 
 class ModelHelper:
-    def __init__(self, model, optimizer):
+    def __init__(self, model, optimizer, device="cuda"):
         self.model = model
-        self.optimzer = optimizer
+        self.optimizer = optimizer
+        self.perceptual_loss = PerceptualLoss().to(device)
+        self.device = device
 
-    def train_model(self, training_loader, validation_loader, epochs, log=False, save_path="save.pt"):
+        # TODO add an EMA
 
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=len(training_loader))
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer, T_0=len(training_loader)*5, eta_min=self.min_learning_rate)
-        self.warm_up = len(training_loader) * 4
-        scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=self.warmup_lr)
-
-        ema_start_step = len(training_loader) * 4
+    def train_model(self, train_loader, test_loader, epochs, log=False, save_path="save.pt"):
         self.model.train()
-        self.EMA_model.eval()
 
         for e in range(epochs):
             epoch_training_loss = 0
@@ -23,17 +34,21 @@ class ModelHelper:
             print(f"Epoch {e}...")
 
             # Training
-            for images, labels in tqdm(training_loader):
+            for images in tqdm(train_loader):
                 self.optimizer.zero_grad()
-                loss = self.predict(images, labels + 1, self.model, learning=True)
-                epoch_training_loss += loss
-                self.EMA.step_ema(ema_model=self.EMA_model, model=self.model, start_step=ema_start_step)
-                scheduler.step()
+                images = images.to(self.device)
+
+                # TODO down scale image
+
+                predicted = self.model(images)
+
+
+
 
             # Validation
             with torch.no_grad():
-                for images, labels in tqdm(validation_loader):
-                    loss = self.predict(images, labels, self.EMA_model, learning=False)
+                for images in tqdm(test_loader):
+                    loss = self.predict(images, self.EMA_model, learning=False)
                     epoch_validation_loss += loss
 
             epoch_validation_loss /= len(validation_loader)
@@ -49,3 +64,4 @@ class ModelHelper:
                      "Sample": image})
                 torch.save(self.EMA_model.state_dict(), save_path)
                 print("Model Saved.")
+

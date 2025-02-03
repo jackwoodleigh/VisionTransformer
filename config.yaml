@@ -1,0 +1,21 @@
+
+model:
+  n_blocks: 4
+  levels: 2
+  dim: 36
+  window_size: 8
+  scale_factor: 2.0
+
+
+training:
+  epochs: 100
+  true_batch_size: 4
+  training_batch_size: 4
+  learning_rate: 0.001
+  testing_data_split: 0.1
+  image_height: 1920
+  image_width: 1080
+  log: True
+  model_save_location: ""
+  perceptual_loss_weight: 0.1
+
