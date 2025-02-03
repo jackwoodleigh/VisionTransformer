@@ -1,2 +1,5 @@
 .idea
 data
+wandb
+.ipynb_checkpoints
+__pycache__
