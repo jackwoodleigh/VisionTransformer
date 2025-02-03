@@ -44,3 +44,10 @@ optimzer = torch.optim.AdamW(model.parameters(), lr=config["training"]["learning
 
 trainer = ModelHelper(model, optimzer)
 
+trainer.train_model(
+    train_loader,
+    test_loader,
+    config["training"]["epoch"],
+    config["model"]["batches_per_epoch"],
+    config["model"]["perceptual_loss_scale"]
+)
