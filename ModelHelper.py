@@ -25,7 +25,7 @@ class ModelHelper:
 
         # TODO add an EMA
 
-    def train_model(self, train_loader, test_loader, epochs, log=False, save_path="save.pt"):
+    def train_model(self, train_loader, test_loader, epochs, batches_per_epoch, log=False, save_path="save.pt"):
         self.model.train()
 
         for e in range(epochs):
@@ -41,8 +41,6 @@ class ModelHelper:
                 # TODO down scale image
 
                 predicted = self.model(images)
-
-
 
 
             # Validation

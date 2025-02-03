@@ -9,12 +9,13 @@ model:
 
 training:
   epochs: 100
-  true_batch_size: 4
-  training_batch_size: 4
+  batch_size: 4
+  batches_per_epoch: 4
   learning_rate: 0.001
   testing_data_split: 0.1
   image_height: 1920
   image_width: 1080
+  training_scale_factor: 4.0
   log: True
   model_save_location: ""
   perceptual_loss_weight: 0.1

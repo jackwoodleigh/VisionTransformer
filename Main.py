@@ -4,26 +4,34 @@ from torch.utils.data import DataLoader, Subset, random_split
 from torchvision import transforms
 from LMLTransformer import LMLTransformer
 from ModelHelper import ModelHelper
+from utils import SuperResolutionDataset
 import yaml
 
 with open('config.yaml', 'r') as file:
     config = yaml.safe_load(file)
 
-transform = transforms.Compose([
+hr_transforms = transforms.Compose([
     transforms.Lambda(lambda img: img.rotate(-90, expand=True) if img.height < img.width else img),
     transforms.CenterCrop((config["training"]["image_height"], config["training"]["image_width"])),
     transforms.ToTensor()
 ])
 
-dataset = torchvision.datasets.ImageFolder(root='./data/train', transform=transform)
+lr_transforms = transforms.Compose([
+    transforms.Resize(int(config["training"]["training_scale_factor"])),
+    transforms.GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 2.0)),
+    transforms.ToTensor()
+])
+
+dataset = torchvision.datasets.ImageFolder(root='./data/train', transform=hr_transforms)
+dataset = SuperResolutionDataset(root='./data/train', hr_transforms=hr_transforms, lr_transforms=lr_transforms)
 
 test_size = int(len(dataset) * config["training"]["testing_data_split"])
 train_size = len(dataset) - test_size
 
 train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
-train_loader = DataLoader(train_dataset, batch_size=config["training"]["true_batch_size"], shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=config["training"]["true_batch_size"], shuffle=True)
+train_loader = DataLoader(train_dataset, batch_size=config["training"]["batch_size"], shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=config["training"]["batch_size"], shuffle=True)
 
 model = LMLTransformer(
     n_blocks=config["model"]["n_blocks"],
