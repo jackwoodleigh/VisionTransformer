@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-
+from torch.utils.checkpoint import checkpoint
 # https://arxiv.org/pdf/2409.03516
 
 class CCM(nn.Module):
@@ -140,7 +140,7 @@ class LHSABlock(nn.Module):
             z = F.interpolate(z_up, size=(H, W), mode='nearest')
             out_maps.append(z)
 
-        # joins feature maps
+            # joins feature maps
         out_maps = self.aggr(torch.cat(out_maps, dim=1))
 
         # multiplicative residual connection for less dependency on original.
@@ -160,6 +160,7 @@ class LMLTBlock(nn.Module):
         self.ln2 = nn.LayerNorm(dim)
 
     def forward(self, x):
+        torch.cuda.empty_cache()
         x = self.LHSA(self.ln1(x)) + x
         x = self.CCM(self.ln2(x)) + x
         return x
@@ -171,6 +172,7 @@ class LMLTransformer(nn.Module):
         self.LHSA_levels = levels
         self.dim = dim
         self.scale_factor = scale_factor
+        self.window_size = window_size
 
         self.feature_extractor = nn.Conv2d(3, dim, 3, 1, 1)
 
@@ -182,30 +184,45 @@ class LMLTransformer(nn.Module):
             nn.PixelShuffle(scale_factor)
         )
 
+    def padding(self, x):
+        _, _, h, w = x.size()
+        scaled_size = self.window_size**2
+
+        mod_pad_h = (scaled_size - h % scaled_size) % scaled_size
+        mod_pad_w = (scaled_size - w % scaled_size) % scaled_size
+        x = F.pad(x, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
+        return x
+
     # 1, 3, 16, 16 = x
     def forward(self, x):
-        B, C, H, W = x.shape
+        _, _, orig_H, orig_W = x.shape
 
-        # TODO add image padding
+        x = self.padding(x)
+        B, C, H, W = x.shape
 
         # B, dim, H, W,
         x = self.feature_extractor(x)
+
         x = x.view(B, H, W, self.dim)
-
         x = self.layers(x) + x
-
         x = x.view(B, self.dim, H, W)
+
+        # crop padding
+        x = x[:, :, :orig_H, :orig_W]
+
         x = self.img_reconstruction(x)
 
         return x
 
 
 if __name__== '__main__':
-    x = torch.randn(2, 3, 1920, 1080)
-    model = LMLTransformer(n_blocks=8, levels=2, dim=36, window_size=8, scale_factor=4)
-    print(model)
+    x = torch.randn(8, 3, 480, 270, requires_grad=True).to("cuda")   # 1920x1080 output
+    model = LMLTransformer(n_blocks=12, levels=4, dim=84, window_size=8, scale_factor=4)
     print(f'params: {sum(map(lambda x: x.numel(), model.parameters()))}')
-    output = model(x)
+    print(torch.cuda.is_available())
+    model = model.to('cuda')
+    #output = model(x)
+    output = checkpoint(model, x)
     print(output.shape)
 
 

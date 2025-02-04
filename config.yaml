@@ -10,7 +10,7 @@ model:
 training:
   epochs: 100
   batch_size: 4
-  batches_per_epoch: 4
+  accumulation_steps: 4
   learning_rate: 0.001
   testing_data_split: 0.1
   image_height: 1920

@@ -48,6 +48,6 @@ trainer.train_model(
     train_loader,
     test_loader,
     config["training"]["epoch"],
-    config["model"]["batches_per_epoch"],
+    config["model"]["accumulation_steps"],
     config["model"]["perceptual_loss_scale"]
 )

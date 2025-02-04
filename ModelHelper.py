@@ -6,6 +6,7 @@ import torch
 from torch import nn
 from torch.nn.functional import mse_loss
 import numpy as np
+from torch.utils.checkpoint import checkpoint
 
 class PerceptualLoss(nn.Module):
     def __init__(self, layer_index=16):
@@ -31,6 +32,8 @@ class ModelHelper:
         self.device = device
 
         # TODO add an EMA
+        # TODO add mixed precision
+        # TODO add scheduler
 
     def get_parameter_count(self):
         return sum(p.numel() for p in self.model.parameters())
@@ -38,13 +41,13 @@ class ModelHelper:
     def predict(self, hr, lr, pl_scale):
         lr = lr.to(self.device)
         hr = hr.to(self.device)
-        hr_p = self.model(lr)
+        hr_p = checkpoint(self.model, lr)   # insane memory issue saver
         loss = mse_loss(hr_p, hr) + pl_scale * self.perceptual_loss(hr_p, hr)
         return loss
 
-    def train_model(self, train_loader, test_loader, epochs, batches_per_epoch, pl_scale, log=False, save_path="save.pt"):
+    def train_model(self, train_loader, test_loader, epochs, accumulation_steps, pl_scale, log=False, save_path="save.pt"):
         self.model.train()
-        i = 0
+        n = len(train_loader)
         self.optimizer.zero_grad()
 
         for e in range(epochs):
@@ -53,16 +56,16 @@ class ModelHelper:
             print(f"Epoch {e}...")
 
             # Training
-            for hr, lr in tqdm(train_loader):
+            for i, (hr, lr) in enumerate(tqdm(train_loader)):
                 loss = self.predict(hr, lr, pl_scale)
-                loss /= batches_per_epoch
+                loss /= accumulation_steps
                 loss.backward()
                 epoch_training_loss.append(loss.item())
                 i += 1
 
-                # might be some carry over with this
-                if i == batches_per_epoch:
-                    i = 0
+                # mini-batch
+                if i % accumulation_steps == 0 or (i + 1) == n:
+                    torch.cuda.synchronize()
                     self.optimizer.step()
                     self.optimizer.zero_grad()
 
@@ -72,8 +75,8 @@ class ModelHelper:
                     loss = self.predict(hr, lr, pl_scale)
                     epoch_validation_loss.append(loss.item())
 
-
             print(f"Training Loss: {np.mean(epoch_training_loss)}, Validation Loss: {np.mean(epoch_validation_loss)}")
+
             # Epoch logging
             if log:
                 pil_image = self.sample(8, torch.tensor([1], device=self.device))
