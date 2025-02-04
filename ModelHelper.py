@@ -7,6 +7,7 @@ from torch import nn
 from torch.nn.functional import mse_loss
 import numpy as np
 from torch.utils.checkpoint import checkpoint
+from torch.cuda.amp import autocast, GradScaler
 
 class PerceptualLoss(nn.Module):
     def __init__(self, layer_index=16):
@@ -30,9 +31,9 @@ class ModelHelper:
         self.optimizer = optimizer
         self.perceptual_loss = PerceptualLoss().to(device)
         self.device = device
+        self.scaler = GradScaler()
 
         # TODO add an EMA
-        # TODO add mixed precision
         # TODO add scheduler
 
     def get_parameter_count(self):
@@ -41,8 +42,11 @@ class ModelHelper:
     def predict(self, hr, lr, pl_scale):
         lr = lr.to(self.device)
         hr = hr.to(self.device)
-        hr_p = checkpoint(self.model, lr)   # insane memory issue saver
-        loss = mse_loss(hr_p, hr) + pl_scale * self.perceptual_loss(hr_p, hr)
+
+        with autocast():
+            hr_p = checkpoint(self.model, lr)   # insane memory issue saver
+            loss = mse_loss(hr_p, hr) + pl_scale * self.perceptual_loss(hr_p, hr)
+
         return loss
 
     def train_model(self, train_loader, test_loader, epochs, accumulation_steps, pl_scale, log=False, save_path="save.pt"):
@@ -59,14 +63,14 @@ class ModelHelper:
             for i, (hr, lr) in enumerate(tqdm(train_loader)):
                 loss = self.predict(hr, lr, pl_scale)
                 loss /= accumulation_steps
-                loss.backward()
                 epoch_training_loss.append(loss.item())
-                i += 1
+                self.scaler.scale(loss).backward()
 
                 # mini-batch
                 if i % accumulation_steps == 0 or (i + 1) == n:
                     torch.cuda.synchronize()
-                    self.optimizer.step()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
                     self.optimizer.zero_grad()
 
             # Validation

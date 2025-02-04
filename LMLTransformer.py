@@ -220,9 +220,10 @@ if __name__== '__main__':
     model = LMLTransformer(n_blocks=12, levels=4, dim=84, window_size=8, scale_factor=4)
     print(f'params: {sum(map(lambda x: x.numel(), model.parameters()))}')
     print(torch.cuda.is_available())
+    model = torch.compile(model)
     model = model.to('cuda')
     #output = model(x)
-    output = checkpoint(model, x)
+    output = checkpoint(model, x, use_reentrant=True)
     print(output.shape)
 
 
