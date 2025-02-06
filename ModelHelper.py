@@ -1,4 +1,6 @@
 import os
+import random
+
 import torch
 import wandb
 from tqdm.auto import tqdm
@@ -9,7 +11,7 @@ from torch.cuda.amp import autocast, GradScaler
 from LossFunctions import PerceptualLoss, FFTLoss
 from torchvision.transforms import ToPILImage
 from PIL import Image
-from utils import save_images_comparison, save_images, tensor_to_pil
+from utils import save_images_comparison, save_images, tensor_to_pil, create_image_grid
 
 class ModelHelper:
     def __init__(self, model, optimizer, device="cuda"):
@@ -19,12 +21,6 @@ class ModelHelper:
         self.perceptual_loss = PerceptualLoss().to(device)
         self.fft_loss = FFTLoss().to(device)
         self.scaler = GradScaler()
-
-        # TODO finish weights and bias
-        # TODO add scheduler
-        # TODO add patch loss
-        # TODO add an EMA
-        # TODO add diffusion refinement
 
     def get_parameter_count(self):
         return sum(p.numel() for p in self.model.parameters())
@@ -49,17 +45,21 @@ class ModelHelper:
 
         print(f"Loaded model from: {file_path }")
 
-    def sample_model(self, lr, hr=None, save_img=False):
-        self.model.eval()
-        hr_p = self.model(lr.to(self.device))
+    def sample_model(self, lr=None, hr=None, random_sample=0, dataset=None, save_img=False):
+        if random_sample != 0 and dataset is not None:
+            r = random.randint(0, len(dataset))
+            lr = torch.stack([dataset[i][1] for i in range(r, r + random_sample)]).to("cuda")
+        if lr is not None:
+            self.model.eval()
+            hr_p = self.model(lr.to(self.device))
 
-        if save_img:
-            if hr is not None:
-                save_images_comparison(hr, hr_p)
+            if save_img:
+                if hr is not None:
+                    save_images_comparison(hr, hr_p)
+                else:
+                    save_images(hr_p)
             else:
-                save_images(hr_p)
-        else:
-            return tensor_to_pil(hr_p)
+                return tensor_to_pil(hr_p)
 
     def predict(self, hr, lr, pl_scale, fft_loss_scale):
         lr = lr.to(self.device).requires_grad_()
@@ -71,7 +71,7 @@ class ModelHelper:
 
         return loss, hr_p
 
-    def train_model(self, train_loader, test_loader, epochs, accumulation_steps, pl_scale, fft_loss_scale, log=False, save_model_every_i_epoch=1, save_path=""):
+    def train_model(self, train_loader, test_loader, epochs, accumulation_steps, pl_scale, fft_loss_scale, log=False, save_model_every_i_epoch=1, save_path="", dataset=None):
         self.model.train()
         self.optimizer.zero_grad()
         n = len(train_loader)
@@ -84,7 +84,7 @@ class ModelHelper:
             loss_accumulator = 0
 
             # Training
-            pbar = tqdm(train_loader, desc=f"Epoch {e+1}/{epochs}", leave=True, dynamic_ncols=True)
+            pbar = tqdm(train_loader, desc=f"Training - Epoch {e+1}/{epochs}", leave=True, dynamic_ncols=True)
             for i, (hr, lr) in enumerate(pbar):
                 loss, _ = self.predict(hr, lr, pl_scale, fft_loss_scale)
                 loss /= accumulation_steps
@@ -110,22 +110,33 @@ class ModelHelper:
                     })
                     loss_accumulator = 0
 
-            '''# Validation
+            # Validation
             with torch.no_grad():
-                for hr, lr in tqdm(test_loader):
-                    loss, _ = self.predict(hr, lr, pl_scale)
-                    epoch_validation_loss.append(loss.item())'''
+                pbar = tqdm(test_loader, desc=f"Validating - Epoch {e + 1}/{epochs}", leave=True, dynamic_ncols=True)
+                for i, (hr, lr) in enumerate(pbar):
+                    loss, _ = self.predict(hr, lr, pl_scale, fft_loss_scale)
+                    epoch_validation_losses.append(loss.item())
 
+            # Saving Model
             if save_path != "" and save_model_every_i_epoch != 0 and (e+1) % save_model_every_i_epoch == 0:
                 self.save_model(f"model_save_epoch_{e}", save_path)
 
             # Epoch logging
             if log:
-                pil_image = self.sample(8, torch.tensor([1], device=self.device))
-                image = wandb.Image(pil_image, caption=f"class 2")
-                wandb.log(
-                    {"Training_Loss": epoch_training_losses, "Validation_Loss": epoch_validation_losses,
-                     "Sample": image})
-                torch.save(self.EMA_model.state_dict(), save_path)
-                print("Model Saved.")
+                log = {
+                    "Training_Avg_Loss": np.mean(epoch_training_losses),
+                    "Training_EMA_Loss": ema_loss,
+                    "Validation_Avg_Loss": np.mean(epoch_validation_losses),
+                }
+                if dataset is not None:
+                    pil_images = self.sample_model(random_sample=3, dataset=dataset)
+                    grid_image = create_image_grid(pil_images, grid_size=(3, 1))
+                    image = wandb.Image(grid_image, caption="Upscaled Images Grid")
+                    log["Image"] = image
+
+                wandb.log(log)
+
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            print("###################################################################")
 

@@ -1,5 +1,4 @@
 import random
-
 import torch
 from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
@@ -9,10 +8,19 @@ from utils import SuperResolutionDataset
 import yaml
 import warnings
 
+
+# TODO finish weights and bias
+# TODO add scheduler
+# TODO add patch loss
+# TODO add an EMA
+# TODO add diffusion refinement
+
+
 def rotate_if_wide(img):
     if img.height < img.width:
         return img.rotate(-90, expand=True)
     return img
+
 
 def initialize(config):
     warnings.filterwarnings("ignore", message=".*compiled with flash attention.*")
@@ -25,7 +33,7 @@ def initialize(config):
         transforms.ToTensor()
     ])
 
-    dataset = SuperResolutionDataset(root='./data/train', scale_values=config["model"]["scale_factor"], base_transforms=base_transforms, subset=100)
+    dataset = SuperResolutionDataset(root='./data/train', scale_values=config["model"]["scale_factor"], base_transforms=base_transforms)
 
     test_size = int(len(dataset) * config["training"]["testing_data_split"])
     train_size = len(dataset) - test_size
@@ -44,21 +52,21 @@ def initialize(config):
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["training"]["learning_rate"])
 
-    trainer = ModelHelper(model, optimizer)
+    helper = ModelHelper(model, optimizer)
 
     if config["tools"]["load_model_directory"] != "":
-        trainer.load_model(config["tools"]["load_model_directory"])
+        helper.load_model(config["tools"]["load_model_directory"])
 
-    size = trainer.get_parameter_count()
+    size = helper.get_parameter_count()
     print(f"Model Size: {size}")
 
-    return model, trainer, (dataset, train_loader, test_loader)
+    return model, helper, (dataset, train_loader, test_loader)
 
 def training(config):
-    model, trainer, (dataset, train_loader, test_loader) = initialize(config)
+    model, helper, (dataset, train_loader, test_loader) = initialize(config)
     print("Running Training...")
     if config["training"]["is_training"]:
-        trainer.train_model(
+        helper.train_model(
             train_loader=train_loader,
             test_loader=test_loader,
             epochs=config["training"]["epochs"],
@@ -67,20 +75,36 @@ def training(config):
             fft_loss_scale=config["training"]["fft_loss_scale"],
             log=config["tools"]["log"],
             save_model_every_i_epoch=config["tools"]["save_model_every_i_epoch"],
-            save_path=config["tools"]["model_save_directory"]
+            save_path=config["tools"]["model_save_directory"],
+            dataset=dataset
         )
 
 
 def sample_images(config, count):
-    model, trainer, (dataset, train_loader, test_loader) = initialize(config)
+    model, helper, (dataset, train_loader, test_loader) = initialize(config)
     print("Running Image Sampling...")
-    r = random.randint(0, len(dataset))
-    trainer.sample_model(torch.stack([dataset[i][1] for i in range(r, r+count)]).to("cuda"), save_img=True)
+    helper.sample_model(random_sample=count, dataset=dataset, save_img=True)
+
 
 if __name__ == '__main__':
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file)
 
+    import wandb
+    wandb.login()
+
+    # Start W&B run
+    if config["tools"]["log"]:
+        wandb.init(
+            project="SuperResolution",
+            config=config
+        )
+        run_name = wandb.run.name
+
+    training(config)
+
+    # Finish run
+    wandb.finish()
     #training(config)
 
-    sample_images(config, 1)
+    #sample_images(config, 1)

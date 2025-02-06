@@ -4,6 +4,7 @@ from torchvision import transforms, datasets
 import torch.nn.functional as F
 import torchvision.utils as vutils
 from torchvision import transforms
+from PIL import Image
 
 class SuperResolutionDataset(Dataset):
     def __init__(self, root, scale_values, base_transforms, subset=None):
@@ -41,3 +42,13 @@ def save_images(tensor, filename="images.png"):
 def tensor_to_pil(tensor):
     to_pil = transforms.ToPILImage()
     return [to_pil(t) for t in tensor]
+
+def create_image_grid(images, grid_size):
+    img_width, img_height = images[0].size
+    grid_width, grid_height = grid_size
+    grid_img = Image.new('RGB', (grid_width * img_width, grid_height * img_height))
+    for index, img in enumerate(images):
+        x = (index % grid_width) * img_width
+        y = (index // grid_width) * img_height
+        grid_img.paste(img, (x, y))
+    return grid_img

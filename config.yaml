@@ -6,7 +6,7 @@ model:
   scale_factor: 4
 
 training:
-  is_training: False
+  is_training: True
   epochs: 200
   batch_size: 1
   accumulation_steps: 1
@@ -18,8 +18,8 @@ training:
   fft_loss_scale: 0.01
 
 tools:
-  log: False
+  log: True
   model_save_directory: "Model Saves"
-  load_model_directory: "model_save_epoch_49.pth" 
+  load_model_directory: ""
   save_model_every_i_epoch: 1
 
