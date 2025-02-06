@@ -70,7 +70,8 @@ class ModelHelper:
             loss = mse_loss(hr_p, hr) + (pl_scale * self.perceptual_loss(hr_p, hr)) + (fft_loss_scale * self.fft_loss(hr_p, hr))
 
         return loss, hr_p
-
+    # test
+    
     def train_model(self, train_loader, test_loader, epochs, accumulation_steps, pl_scale, fft_loss_scale, log=False, save_model_every_i_epoch=1, save_path="", dataset=None):
         self.model.train()
         self.optimizer.zero_grad()
