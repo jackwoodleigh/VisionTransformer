@@ -5,6 +5,7 @@ from torch import nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 # https://arxiv.org/pdf/2409.03516
+# pip install https://github.com/bycloud-AI/DiffBIR-Windows/raw/refs/heads/main/triton-2.0.0-cp310-cp310-win_amd64.whl
 
 class CCM(nn.Module):
     def __init__(self, dim, growth_rate=2.0):
@@ -160,7 +161,6 @@ class LMLTBlock(nn.Module):
         self.ln2 = nn.LayerNorm(dim)
 
     def forward(self, x):
-        torch.cuda.empty_cache()
         x = self.LHSA(self.ln1(x)) + x
         x = self.CCM(self.ln2(x)) + x
         return x
@@ -216,11 +216,15 @@ class LMLTransformer(nn.Module):
 
 
 if __name__== '__main__':
+    import torch._dynamo
+    torch._dynamo.config.suppress_errors = True
+    torch.set_float32_matmul_precision('high')
+    print(torch.cuda.is_available())
+
     x = torch.randn(8, 3, 480, 270, requires_grad=True).to("cuda")   # 1920x1080 output
     model = LMLTransformer(n_blocks=12, levels=4, dim=84, window_size=8, scale_factor=4)
     print(f'params: {sum(map(lambda x: x.numel(), model.parameters()))}')
-    print(torch.cuda.is_available())
-    model = torch.compile(model)
+
     model = model.to('cuda')
     #output = model(x)
     output = checkpoint(model, x, use_reentrant=True)

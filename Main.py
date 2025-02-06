@@ -1,53 +1,65 @@
 import torch
 import torchvision
-from torch.utils.data import DataLoader, Subset, random_split
+from torch.utils.data import DataLoader, Subset, random_split, TensorDataset
 from torchvision import transforms
 from LMLTransformer import LMLTransformer
 from ModelHelper import ModelHelper
 from utils import SuperResolutionDataset
 import yaml
+import warnings
 
-with open('config.yaml', 'r') as file:
-    config = yaml.safe_load(file)
+def rotate_if_wide(img):
+    if img.height < img.width:
+        return img.rotate(-90, expand=True)
+    return img
 
-hr_transforms = transforms.Compose([
-    transforms.Lambda(lambda img: img.rotate(-90, expand=True) if img.height < img.width else img),
-    transforms.CenterCrop((config["training"]["image_height"], config["training"]["image_width"])),
-    transforms.ToTensor()
-])
 
-lr_transforms = transforms.Compose([
-    transforms.Resize(int(config["training"]["training_scale_factor"])),
-    transforms.GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 2.0)),
-    transforms.ToTensor()
-])
+if __name__ == '__main__':
+    warnings.filterwarnings("ignore", message=".*compiled with flash attention.*")
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
 
-dataset = torchvision.datasets.ImageFolder(root='./data/train', transform=hr_transforms)
-dataset = SuperResolutionDataset(root='./data/train', hr_transforms=hr_transforms, lr_transforms=lr_transforms)
+    with open('config.yaml', 'r') as file:
+        config = yaml.safe_load(file)
 
-test_size = int(len(dataset) * config["training"]["testing_data_split"])
-train_size = len(dataset) - test_size
+    base_transforms = transforms.Compose([
+        transforms.Lambda(rotate_if_wide),
+        transforms.CenterCrop((config["training"]["image_height"], config["training"]["image_width"])),
+        transforms.ToTensor()
+    ])
 
-train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
+    dataset = SuperResolutionDataset(root='./data/train', scale_values=config["model"]["scale_factor"], base_transforms=base_transforms)
 
-train_loader = DataLoader(train_dataset, batch_size=config["training"]["batch_size"], shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=config["training"]["batch_size"], shuffle=True)
+    test_size = int(len(dataset) * config["training"]["testing_data_split"])
+    train_size = len(dataset) - test_size
 
-model = LMLTransformer(
-    n_blocks=config["model"]["n_blocks"],
-    levels=config["model"]["levels"], window_size=config["model"]["n_blocks"],
-    dim=config["model"]["dim"],
-    scale_factor=config["model"]["scale_factor"]
-)
+    train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
-optimzer = torch.optim.AdamW(model.parameters(), lr=config["training"]["learning_rate"])
+    train_loader = DataLoader(train_dataset, batch_size=config["training"]["batch_size"], shuffle=True, num_workers=2, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=config["training"]["batch_size"], shuffle=True, num_workers=2, pin_memory=True)
 
-trainer = ModelHelper(model, optimzer)
+    model = LMLTransformer(
+        n_blocks=config["model"]["n_blocks"],
+        levels=config["model"]["levels"], window_size=config["model"]["n_blocks"],
+        dim=config["model"]["dim"],
+        scale_factor=config["model"]["scale_factor"]
+    )
 
-trainer.train_model(
-    train_loader,
-    test_loader,
-    config["training"]["epoch"],
-    config["model"]["accumulation_steps"],
-    config["model"]["perceptual_loss_scale"]
-)
+    optimzer = torch.optim.AdamW(model.parameters(), lr=config["training"]["learning_rate"])
+
+    trainer = ModelHelper(model, optimzer)
+
+    size = trainer.get_parameter_count()
+    print(f"Model Size: {size}")
+
+    trainer.train_model(
+        train_loader=train_loader,
+        test_loader=test_loader,
+        epochs=config["training"]["epochs"],
+        accumulation_steps=config["training"]["accumulation_steps"],
+        pl_scale=config["training"]["perceptual_loss_scale"],
+        fft_loss_scale=config["training"]["fft_loss_scale"],
+        log=config["tracking_tools"]["log"],
+        save_model_every_i_epoch=config["tracking_tools"]["save_model_every_i_epoch"],
+        save_path=config["tracking_tools"]["save_path"]
+    )
