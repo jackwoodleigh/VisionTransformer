@@ -18,8 +18,12 @@ class ModelHelper:
         self.fft_loss = FFTLoss().to(device)
         self.scaler = GradScaler()
 
-        # TODO add an EMA
+        # TODO add sampling function
+        # TODO finish weights and bias
         # TODO add scheduler
+        # TODO add patch loss
+        # TODO add an EMA
+        # TODO add diffusion refinement
 
     def get_parameter_count(self):
         return sum(p.numel() for p in self.model.parameters())
@@ -31,13 +35,17 @@ class ModelHelper:
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict()
         }
-        torch.save(save, os.path.join(path, f'{name}.pth'))
+        file_name = f'{name}.pth'
+        torch.save(save, os.path.join(path, file_name))
+        print(f"Saved model to: {os.path.join(path, file_name)}")
 
-    def load_model(self, load_optimizer=True):
-        save = torch.load('model_checkpoint.pth')
+    def load_model(self, path, load_optimizer=True):
+        save = torch.load(path)
         self.model.load_state_dict(save['model_state_dict'])
         if load_optimizer:
             self.optimizer.load_state_dict(save['optimizer_state_dict'])
+
+        print(f"Loaded model from: {path}")
 
     def sample_model_PIL(self, image):
         pass
@@ -65,7 +73,7 @@ class ModelHelper:
             loss_accumulator = 0
 
             # Training
-            pbar = tqdm(train_loader, desc=f"Epoch {e+1}/{epochs}", total=len(train_loader)//accumulation_steps, leave=False, dynamic_ncols=True)
+            pbar = tqdm(train_loader, desc=f"Epoch {e+1}/{epochs}", leave=True, dynamic_ncols=True)
             for i, (hr, lr) in enumerate(pbar):
                 loss, _ = self.predict(hr, lr, pl_scale, fft_loss_scale)
                 loss /= accumulation_steps

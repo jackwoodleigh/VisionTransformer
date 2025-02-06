@@ -1,11 +1,10 @@
-import numpy as np
-
 import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
+
+
 # https://arxiv.org/pdf/2409.03516
-# pip install https://github.com/bycloud-AI/DiffBIR-Windows/raw/refs/heads/main/triton-2.0.0-cp310-cp310-win_amd64.whl
 
 class CCM(nn.Module):
     def __init__(self, dim, growth_rate=2.0):
@@ -26,13 +25,14 @@ class CCM(nn.Module):
         x = x.view(B, H, W, C)
         return x
 
+
 class ViTBlock(nn.Module):
     def __init__(self, window_size, dim):
         super().__init__()
         self.window_size = window_size
         self.dim = dim
 
-        self.qkv = nn.Linear(dim, 3*dim)
+        self.qkv = nn.Linear(dim, 3 * dim)
         self.pe_encoder = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim)
         self.out_proj = nn.Linear(dim, dim)
 
@@ -53,7 +53,7 @@ class ViTBlock(nn.Module):
         # inverse of window create
         b = x.shape[0] // ((w // self.window_size) * (h // self.window_size))
         x = x.view(b, self.window_size, self.window_size, -1)
-        x = x.view(b, h // self.window_size, w//self.window_size, self.window_size, self.window_size, -1)
+        x = x.view(b, h // self.window_size, w // self.window_size, self.window_size, self.window_size, -1)
         return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(b, -1, h, w)
 
     # input: -1, window_size^2, C
@@ -93,6 +93,7 @@ class ViTBlock(nn.Module):
 
         return x
 
+
 class LHSABlock(nn.Module):
     def __init__(self, levels, window_size, dim):
         super().__init__()
@@ -117,7 +118,7 @@ class LHSABlock(nn.Module):
         downsampled_maps = []
         for i in range(self.levels):
             if i > 0:
-                patch_size = (H//2**i, W//2**i)
+                patch_size = (H // 2 ** i, W // 2 ** i)
 
                 # down samples to new size
                 z_down = F.adaptive_max_pool2d(x_chunked[i], patch_size)
@@ -131,11 +132,11 @@ class LHSABlock(nn.Module):
             z = self.vit[i](downsampled_maps[i])
 
             # interpolating it the size of the layer above
-            z_up = F.interpolate(z, size=(z.shape[2]*2, z.shape[3]*2), mode='nearest')
+            z_up = F.interpolate(z, size=(z.shape[2] * 2, z.shape[3] * 2), mode='nearest')
 
             # adding elementwise the up-sampled feature map for increased detail
             if i > 0:
-                downsampled_maps[i-1] = downsampled_maps[i-1] + z_up
+                downsampled_maps[i - 1] = downsampled_maps[i - 1] + z_up
 
             # interpolating image back to original H*W feature map size and returning
             z = F.interpolate(z_up, size=(H, W), mode='nearest')
@@ -152,6 +153,7 @@ class LHSABlock(nn.Module):
 
         return out_maps
 
+
 class LMLTBlock(nn.Module):
     def __init__(self, levels, window_size, dim, ffn_scale=2.0):
         super().__init__()
@@ -165,6 +167,7 @@ class LMLTBlock(nn.Module):
         x = self.CCM(self.ln2(x)) + x
         return x
 
+
 class LMLTransformer(nn.Module):
     def __init__(self, n_blocks, levels, window_size, dim, scale_factor, ffn_scale=2.0):
         super().__init__()
@@ -176,17 +179,18 @@ class LMLTransformer(nn.Module):
 
         self.feature_extractor = nn.Conv2d(3, dim, 3, 1, 1)
 
-        self.layers = nn.Sequential(*[LMLTBlock(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale) for _ in range(n_blocks)])
+        self.layers = nn.Sequential(
+            *[LMLTBlock(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale) for _ in range(n_blocks)])
 
         # convert from dim -> color scale * img scale factor and uses pixel shuffle to organize image
         self.img_reconstruction = nn.Sequential(
-            nn.Conv2d(dim, 3 * scale_factor**2, 3, 1, 1),
+            nn.Conv2d(dim, 3 * scale_factor ** 2, 3, 1, 1),
             nn.PixelShuffle(scale_factor)
         )
 
     def padding(self, x):
         _, _, h, w = x.size()
-        scaled_size = self.window_size**2
+        scaled_size = self.window_size ** 2
 
         mod_pad_h = (scaled_size - h % scaled_size) % scaled_size
         mod_pad_w = (scaled_size - w % scaled_size) % scaled_size
@@ -215,13 +219,11 @@ class LMLTransformer(nn.Module):
         return x
 
 
-if __name__== '__main__':
-    import torch._dynamo
-    torch._dynamo.config.suppress_errors = True
+if __name__ == '__main__':
     torch.set_float32_matmul_precision('high')
     print(torch.cuda.is_available())
 
-    x = torch.randn(8, 3, 480, 270, requires_grad=True).to("cuda")   # 1920x1080 output
+    x = torch.randn(8, 3, 480, 270, requires_grad=True).to("cuda")  # 1920x1080 output
     model = LMLTransformer(n_blocks=12, levels=4, dim=84, window_size=8, scale_factor=4)
     print(f'params: {sum(map(lambda x: x.numel(), model.parameters()))}')
 
@@ -229,8 +231,6 @@ if __name__== '__main__':
     #output = model(x)
     output = checkpoint(model, x, use_reentrant=True)
     print(output.shape)
-
-
 
 #vit = VisionTransformer(4, 4, 3, 32, 32)
 # t = Transformer(4)

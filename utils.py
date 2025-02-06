@@ -45,7 +45,8 @@ class FFTLoss(nn.Module):
         self.loss_fn = loss_fn
 
     def forward(self, predicted, target):
-        predicted_fft = torch.fft.fft2(predicted)
+
+        predicted_fft = torch.fft.fft2(predicted.float())
         target_fft = torch.fft.fft2(target)
 
         predicted_mag = torch.abs(predicted_fft)
@@ -53,3 +54,4 @@ class FFTLoss(nn.Module):
 
         return self.loss_fn(predicted_mag, target_mag)
 
+# https://www.sciencedirect.com/science/article/pii/S0031320323002108 patch loss

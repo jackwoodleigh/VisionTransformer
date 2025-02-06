@@ -1,4 +1,3 @@
-
 model:
   n_blocks: 8
   levels: 4
@@ -6,21 +5,20 @@ model:
   window_size: 8
   scale_factor: 4
 
-
 training:
   epochs: 100
   batch_size: 1
-  accumulation_steps: 2
+  accumulation_steps: 4
   learning_rate: 0.001
   testing_data_split: 0.1
   image_height: 1920
   image_width: 1080
-  perceptual_loss_scale: 0.1
-  fft_loss_scale: 0.1
+  perceptual_loss_scale: 0.01
+  fft_loss_scale: 0.01
 
-
-tracking_tools:
+tools:
   log: False
-  model_save_location: "Model Saves"
-  save_model_every_i_epoch: 0
+  model_save_directory: "Model Saves"
+  load_model_directory: ""  #"Model Saves/model_save_epoch_0.pth"
+  save_model_every_i_epoch: 1
 

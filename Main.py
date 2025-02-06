@@ -1,6 +1,5 @@
 import torch
-import torchvision
-from torch.utils.data import DataLoader, Subset, random_split, TensorDataset
+from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
 from LMLTransformer import LMLTransformer
 from ModelHelper import ModelHelper
@@ -13,14 +12,10 @@ def rotate_if_wide(img):
         return img.rotate(-90, expand=True)
     return img
 
-
-if __name__ == '__main__':
+def run(config):
     warnings.filterwarnings("ignore", message=".*compiled with flash attention.*")
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.deterministic = False
-
-    with open('config.yaml', 'r') as file:
-        config = yaml.safe_load(file)
 
     base_transforms = transforms.Compose([
         transforms.Lambda(rotate_if_wide),
@@ -52,6 +47,9 @@ if __name__ == '__main__':
     size = trainer.get_parameter_count()
     print(f"Model Size: {size}")
 
+    if config["tools"]["load_model_directory"] != "":
+        trainer.load_model(config["tools"]["load_model_directory"])
+
     trainer.train_model(
         train_loader=train_loader,
         test_loader=test_loader,
@@ -59,7 +57,14 @@ if __name__ == '__main__':
         accumulation_steps=config["training"]["accumulation_steps"],
         pl_scale=config["training"]["perceptual_loss_scale"],
         fft_loss_scale=config["training"]["fft_loss_scale"],
-        log=config["tracking_tools"]["log"],
-        save_model_every_i_epoch=config["tracking_tools"]["save_model_every_i_epoch"],
-        save_path=config["tracking_tools"]["save_path"]
+        log=config["tools"]["log"],
+        save_model_every_i_epoch=config["tools"]["save_model_every_i_epoch"],
+        save_path=config["tools"]["model_save_directory"]
     )
+
+
+if __name__ == '__main__':
+    with open('config.yaml', 'r') as file:
+        config = yaml.safe_load(file)
+
+    run(config)
