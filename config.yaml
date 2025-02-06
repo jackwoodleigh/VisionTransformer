@@ -6,9 +6,10 @@ model:
   scale_factor: 4
 
 training:
-  epochs: 100
+  is_training: False
+  epochs: 200
   batch_size: 1
-  accumulation_steps: 4
+  accumulation_steps: 1
   learning_rate: 0.001
   testing_data_split: 0.1
   image_height: 1920
@@ -19,6 +20,6 @@ training:
 tools:
   log: False
   model_save_directory: "Model Saves"
-  load_model_directory: ""  #"Model Saves/model_save_epoch_0.pth"
+  load_model_directory: "model_save_epoch_49.pth" 
   save_model_every_i_epoch: 1
 

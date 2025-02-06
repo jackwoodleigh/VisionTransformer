@@ -6,8 +6,10 @@ from torch.nn.functional import mse_loss
 import numpy as np
 from torch.utils.checkpoint import checkpoint
 from torch.cuda.amp import autocast, GradScaler
-from utils import PerceptualLoss, FFTLoss
-
+from LossFunctions import PerceptualLoss, FFTLoss
+from torchvision.transforms import ToPILImage
+from PIL import Image
+from utils import save_images_comparison, save_images, tensor_to_pil
 
 class ModelHelper:
     def __init__(self, model, optimizer, device="cuda"):
@@ -18,7 +20,6 @@ class ModelHelper:
         self.fft_loss = FFTLoss().to(device)
         self.scaler = GradScaler()
 
-        # TODO add sampling function
         # TODO finish weights and bias
         # TODO add scheduler
         # TODO add patch loss
@@ -39,16 +40,26 @@ class ModelHelper:
         torch.save(save, os.path.join(path, file_name))
         print(f"Saved model to: {os.path.join(path, file_name)}")
 
-    def load_model(self, path, load_optimizer=True):
-        save = torch.load(path)
+    def load_model(self, directory, file_name, load_optimizer=True):
+        file_path = os.path.join(directory, file_name)
+        save = torch.load(file_path )
         self.model.load_state_dict(save['model_state_dict'])
         if load_optimizer:
             self.optimizer.load_state_dict(save['optimizer_state_dict'])
 
-        print(f"Loaded model from: {path}")
+        print(f"Loaded model from: {file_path }")
 
-    def sample_model_PIL(self, image):
-        pass
+    def sample_model(self, lr, hr=None, save_img=False):
+        self.model.eval()
+        hr_p = self.model(lr.to(self.device))
+
+        if save_img:
+            if hr is not None:
+                save_images_comparison(hr, hr_p)
+            else:
+                save_images(hr_p)
+        else:
+            return tensor_to_pil(hr_p)
 
     def predict(self, hr, lr, pl_scale, fft_loss_scale):
         lr = lr.to(self.device).requires_grad_()
@@ -64,7 +75,7 @@ class ModelHelper:
         self.model.train()
         self.optimizer.zero_grad()
         n = len(train_loader)
-        ema_loss_decay = 0.999
+        effective_ema_loss_decay = 0.999 ** accumulation_steps
         ema_loss = None
 
         for e in range(epochs):
@@ -89,7 +100,7 @@ class ModelHelper:
                     if ema_loss is None:
                         ema_loss = loss_accumulator
                     else:
-                        ema_loss = ema_loss_decay * ema_loss + (1 - ema_loss_decay) * loss_accumulator
+                        ema_loss = effective_ema_loss_decay * ema_loss + (1 - effective_ema_loss_decay) * loss_accumulator
 
                     epoch_training_losses.append(loss_accumulator)
                     pbar.set_postfix({
