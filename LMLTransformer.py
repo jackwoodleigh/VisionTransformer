@@ -118,10 +118,11 @@ class LHSABlock(nn.Module):
         downsampled_maps = []
         for i in range(self.levels):
             if i > 0:
-                patch_size = (H // 2 ** i, W // 2 ** i)
+                # new size
+                size = (H // 2 ** i, W // 2 ** i)
 
                 # down samples to new size
-                z_down = F.adaptive_max_pool2d(x_chunked[i], patch_size)
+                z_down = F.adaptive_max_pool2d(x_chunked[i], size)
                 downsampled_maps.append(z_down)
 
             else:
@@ -131,18 +132,19 @@ class LHSABlock(nn.Module):
         for i in reversed(range(self.levels)):
             z = self.vit[i](downsampled_maps[i])
 
-            # interpolating it the size of the layer above
-            z_up = F.interpolate(z, size=(z.shape[2] * 2, z.shape[3] * 2), mode='area')
-
-            # adding elementwise the up-sampled feature map for increased detail
             if i > 0:
+                # interpolating it the size of the layer above
+                z_up = F.interpolate(z, size=(z.shape[2] * 2, z.shape[3] * 2), mode='bicubic')
+
+                # adding elementwise the up-sampled feature map for increased detail
                 downsampled_maps[i - 1] = downsampled_maps[i - 1] + z_up
 
-            # interpolating image back to original H*W feature map size and returning
-            z = F.interpolate(z_up, size=(H, W), mode='area')
+                # interpolating image back to original H*W feature map size and returning
+                z = F.interpolate(z_up, size=(H, W), mode='bicubic')
+
             out_maps.append(z)
 
-            # joins feature maps
+        # aggregate feature maps
         out_maps = self.aggr(torch.cat(out_maps, dim=1))
 
         # multiplicative residual connection for less dependency on original.

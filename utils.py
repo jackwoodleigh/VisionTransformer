@@ -27,7 +27,7 @@ class SuperResolutionDataset(Dataset):
     def __getitem__(self, idx):
         hr_img, _ = self.dataset[idx]
         #lr_img = self.blur_transforms(hr_img)
-        lr_img = F.interpolate(hr_img.unsqueeze(0), scale_factor=(1 / self.scale_values), mode='area')
+        lr_img = F.interpolate(hr_img.unsqueeze(0), scale_factor=(1 / self.scale_values), mode='bicubic')
 
         return hr_img, lr_img.squeeze(0)
 
@@ -79,5 +79,5 @@ def calculate_ssim(hr_p, hr, clamp=False, denorm=False):
         hr_p = denormalize_image(hr_p, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
     if clamp:
         hr_p = torch.clamp(hr_p, 0.0, 1.0)
-    ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(hr.device)
+    ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(hr_p.device)
     return ssim(hr_p, hr)

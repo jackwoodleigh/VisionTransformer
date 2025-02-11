@@ -117,17 +117,23 @@ class ModelHelper:
                     pbar.set_postfix({
                         "Batch Loss": f"{loss_accumulator:.5f}",
                         "EMA Batch Loss": f"{ema_loss:.5f}",
-                        "Epoch Avg Loss": f"{np.mean(epoch_training_losses):.5f}"
+                        "Epoch Avg Loss": f"{np.mean(epoch_training_losses):.5f}",
+                        "Learning_Rate": self.optimizer.param_groups[0]['lr']
                     })
                     loss_accumulator = 0
             scheduler.step()
 
+            ssim = []
+            psnr = []
             # Validation
             with torch.no_grad():
                 pbar = tqdm(test_loader, desc=f"Validating - Epoch {e + 1}/{epochs}", leave=True, dynamic_ncols=True)
                 for i, (hr, lr) in enumerate(pbar):
-                    loss, _ = self.predict(hr, lr, pl_scale, fft_loss_scale)
+                    loss, hr_p = self.predict(hr, lr, pl_scale, fft_loss_scale)
                     epoch_validation_losses.append(loss.item())
+                    hr = hr.to(self.device)
+                    ssim.append(calculate_ssim(hr_p.float(), hr.float()).item())
+                    psnr.append(calculate_psnr(hr_p.float(), hr.float()).mean().item())
 
             torch.cuda.synchronize()
             # Saving Model
@@ -139,7 +145,7 @@ class ModelHelper:
                 log = {
                     "Training_Avg_Loss": np.mean(epoch_training_losses),
                     "Training_EMA_Loss": ema_loss,
-                    "Validation_Avg_Loss": np.mean(epoch_validation_losses),
+                    "Validation_Avg_Loss": np.mean(epoch_validation_losses)
                 }
                 if dataset is not None:
                     hr_p, hr = self.sample_model(random_sample=3, dataset=dataset)
@@ -147,8 +153,8 @@ class ModelHelper:
                     grid_image = create_image_grid(pil_images, grid_size=(3, 1))
                     image = wandb.Image(grid_image, caption="Upscaled Images Grid")
                     log["Image"] = image
-                    log["SSIM"] = calculate_ssim(hr_p, hr).mean().item()
-                    log["PSNR_"] = calculate_psnr(hr_p, hr).mean().item()
+                    log["SSIM"] = np.mean(ssim)
+                    log["PSNR_"] = np.mean(psnr)
 
                 wandb.log(log)
 

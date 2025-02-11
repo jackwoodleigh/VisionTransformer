@@ -9,13 +9,13 @@ training:
   is_training: True
   epochs: 100
   batch_size: 2
-  accumulation_steps: 8
+  accumulation_steps: 16
   learning_rate: 0.001
   testing_data_split: 0.1
   image_height: 1080
   image_width: 1920
-  perceptual_loss_scale: 0.01
-  fft_loss_scale: 0.3
+  perceptual_loss_scale: 0.005
+  fft_loss_scale: 0.05
 
 tools:
   log: True

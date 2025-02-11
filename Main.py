@@ -91,7 +91,7 @@ def test(config):
     model, helper, (dataset, train_loader, test_loader) = initialize(config)
     hr_p, hr = helper.sample_model(random_sample=3, dataset=dataset)
     t1 = calculate_psnr(hr_p, hr).mean().item()
-    t2 = calculate_ssim(hr_p, hr).mean().item()
+    t2 = calculate_ssim(hr_p, hr).item()
     print()
 
 
