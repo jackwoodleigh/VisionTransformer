@@ -7,19 +7,19 @@ model:
 
 training:
   is_training: True
-  epochs: 200
-  batch_size: 1
-  accumulation_steps: 1
+  epochs: 100
+  batch_size: 2
+  accumulation_steps: 8
   learning_rate: 0.001
   testing_data_split: 0.1
-  image_height: 1920
-  image_width: 1080
+  image_height: 1080
+  image_width: 1920
   perceptual_loss_scale: 0.01
-  fft_loss_scale: 0.01
+  fft_loss_scale: 0.3
 
 tools:
   log: True
   model_save_directory: "Model Saves"
-  load_model_directory: ""
+  load_model_save_name: ""
   save_model_every_i_epoch: 1
 

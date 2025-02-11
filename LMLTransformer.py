@@ -132,14 +132,14 @@ class LHSABlock(nn.Module):
             z = self.vit[i](downsampled_maps[i])
 
             # interpolating it the size of the layer above
-            z_up = F.interpolate(z, size=(z.shape[2] * 2, z.shape[3] * 2), mode='nearest')
+            z_up = F.interpolate(z, size=(z.shape[2] * 2, z.shape[3] * 2), mode='area')
 
             # adding elementwise the up-sampled feature map for increased detail
             if i > 0:
                 downsampled_maps[i - 1] = downsampled_maps[i - 1] + z_up
 
             # interpolating image back to original H*W feature map size and returning
-            z = F.interpolate(z_up, size=(H, W), mode='nearest')
+            z = F.interpolate(z_up, size=(H, W), mode='area')
             out_maps.append(z)
 
             # joins feature maps
@@ -161,6 +161,7 @@ class LMLTBlock(nn.Module):
         self.CCM = CCM(dim, ffn_scale)
         self.ln1 = nn.LayerNorm(dim)
         self.ln2 = nn.LayerNorm(dim)
+        self.rezero_weight = nn.Parameter(torch.zeros(1))
 
     def forward(self, x):
         x = self.LHSA(self.ln1(x)) + x

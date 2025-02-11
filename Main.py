@@ -7,30 +7,32 @@ from ModelHelper import ModelHelper
 from utils import SuperResolutionDataset
 import yaml
 import warnings
+from utils import calculate_psnr, calculate_ssim
 
 
-# TODO finish weights and bias
-# TODO add scheduler
+
 # TODO add patch loss
 # TODO add an EMA
 # TODO add diffusion refinement
 
 
 def rotate_if_wide(img):
-    if img.height < img.width:
+    if img.height > img.width:
         return img.rotate(-90, expand=True)
     return img
-
 
 def initialize(config):
     warnings.filterwarnings("ignore", message=".*compiled with flash attention.*")
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.deterministic = False
 
+    # TODO need to fix this so it doesnt add black pixels
+
     base_transforms = transforms.Compose([
         transforms.Lambda(rotate_if_wide),
         transforms.CenterCrop((config["training"]["image_height"], config["training"]["image_width"])),
-        transforms.ToTensor()
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
     ])
 
     dataset = SuperResolutionDataset(root='./data/train', scale_values=config["model"]["scale_factor"], base_transforms=base_transforms)
@@ -40,8 +42,8 @@ def initialize(config):
 
     train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
-    train_loader = DataLoader(train_dataset, batch_size=config["training"]["batch_size"], shuffle=True, num_workers=2, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=config["training"]["batch_size"], shuffle=True, num_workers=2, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=config["training"]["batch_size"], shuffle=True, num_workers=4, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=config["training"]["batch_size"], shuffle=True, num_workers=4, pin_memory=True)
 
     model = LMLTransformer(
         n_blocks=config["model"]["n_blocks"],
@@ -54,8 +56,8 @@ def initialize(config):
 
     helper = ModelHelper(model, optimizer)
 
-    if config["tools"]["load_model_directory"] != "":
-        helper.load_model(config["tools"]["load_model_directory"])
+    if config["tools"]["load_model_save_name"] != "":
+        helper.load_model(config["tools"]["model_save_directory"], config["tools"]["load_model_save_name"])
 
     size = helper.get_parameter_count()
     print(f"Model Size: {size}")
@@ -85,26 +87,31 @@ def sample_images(config, count):
     print("Running Image Sampling...")
     helper.sample_model(random_sample=count, dataset=dataset, save_img=True)
 
+def test(config):
+    model, helper, (dataset, train_loader, test_loader) = initialize(config)
+    hr_p, hr = helper.sample_model(random_sample=3, dataset=dataset)
+    t1 = calculate_psnr(hr_p, hr).mean().item()
+    t2 = calculate_ssim(hr_p, hr).mean().item()
+    print()
+
 
 if __name__ == '__main__':
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file)
 
-    import wandb
-    wandb.login()
-
     # Start W&B run
     if config["tools"]["log"]:
+        import wandb
+        wandb.login()
         wandb.init(
             project="SuperResolution",
             config=config
         )
         run_name = wandb.run.name
 
+    #test(config)
     training(config)
 
-    # Finish run
-    wandb.finish()
     #training(config)
 
     #sample_images(config, 1)
