@@ -7,14 +7,14 @@ model:
 
 training:
   is_training: True
-  epochs: 100
+  epochs: 200
   batch_size: 2
   accumulation_steps: 16
-  learning_rate: 0.001
+  learning_rate: 0.002
   testing_data_split: 0.1
   image_height: 1080
   image_width: 1920
-  perceptual_loss_scale: 0.005
+  perceptual_loss_scale: 0.03
   fft_loss_scale: 0.05
 
 tools:

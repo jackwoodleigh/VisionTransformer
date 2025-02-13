@@ -8,13 +8,21 @@ from utils import SuperResolutionDataset
 import yaml
 import warnings
 from utils import calculate_psnr, calculate_ssim
-
+import torchvision.transforms.functional as F
 
 
 # TODO add patch loss
 # TODO add an EMA
 # TODO add diffusion refinement
 
+class PadTo1080:
+    def __call__(self, img):
+        w, h = img.size
+        pad_w = max(0, 1080 - w)
+        pad_h = max(0, 1080 - h)
+        padding = (pad_w // 2, pad_h // 2, pad_w - (pad_w // 2), pad_h - (pad_h // 2))
+        img = F.pad(img, padding, padding_mode='reflect')
+        return img
 
 def rotate_if_wide(img):
     if img.height > img.width:
@@ -29,12 +37,16 @@ def initialize(config):
     # TODO need to fix this so it doesnt add black pixels
 
     base_transforms = transforms.Compose([
-        transforms.Lambda(rotate_if_wide),
-        transforms.CenterCrop((config["training"]["image_height"], config["training"]["image_width"])),
+        PadTo1080(),
+        transforms.RandomCrop(config["training"]["image_height"]),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomRotation(degrees=[-90, 90]),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
     ])
-
+    # transforms.Lambda(rotate_if_wide),
+    # transforms.CenterCrop((config["training"]["image_height"], config["training"]["image_width"])),
     dataset = SuperResolutionDataset(root='./data/train', scale_values=config["model"]["scale_factor"], base_transforms=base_transforms)
 
     test_size = int(len(dataset) * config["training"]["testing_data_split"])

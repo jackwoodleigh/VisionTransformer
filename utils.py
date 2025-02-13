@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import Dataset, Subset
 from torchvision import transforms, datasets
 import torch.nn.functional as F
+import torchvision.transforms.functional as Ft
 import torchvision.utils as vutils
 from torchvision import transforms
 from PIL import Image
@@ -28,7 +29,6 @@ class SuperResolutionDataset(Dataset):
         hr_img, _ = self.dataset[idx]
         #lr_img = self.blur_transforms(hr_img)
         lr_img = F.interpolate(hr_img.unsqueeze(0), scale_factor=(1 / self.scale_values), mode='bicubic')
-
         return hr_img, lr_img.squeeze(0)
 
 
