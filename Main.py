@@ -34,20 +34,29 @@ def initialize(config):
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.deterministic = False
 
-    # TODO need to fix this so it doesnt add black pixels
+    if config["training"]["transform_data"]:
+        transform = transforms.Compose([
+            PadTo1080(),
+            transforms.RandomCrop(config["training"]["image_height"]),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomRotation(degrees=[-90, 90]),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
+        ])
+    else:
+        transform = transforms.Compose([
+            transforms.Lambda(rotate_if_wide),
+            transforms.CenterCrop((config["training"]["image_height"], config["training"]["image_width"])),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
+        ])
 
-    base_transforms = transforms.Compose([
-        PadTo1080(),
-        transforms.RandomCrop(config["training"]["image_height"]),
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomRotation(degrees=[-90, 90]),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
-    ])
-    # transforms.Lambda(rotate_if_wide),
-    # transforms.CenterCrop((config["training"]["image_height"], config["training"]["image_width"])),
-    dataset = SuperResolutionDataset(root='./data/train', scale_values=config["model"]["scale_factor"], base_transforms=base_transforms)
+    if config["training"]["data_subset"] != 0:
+        print(f"Using a subset of {config["training"]["data_subset"]} images.")
+        dataset = SuperResolutionDataset(root='./data/train', scale_values=config["model"]["scale_factor"], transform=transform, subset=config["training"]["data_subset"])
+    else:
+        dataset = SuperResolutionDataset(root='./data/train', scale_values=config["model"]["scale_factor"], transform=transform)
 
     test_size = int(len(dataset) * config["training"]["testing_data_split"])
     train_size = len(dataset) - test_size
@@ -66,10 +75,10 @@ def initialize(config):
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["training"]["learning_rate"])
 
-    helper = ModelHelper(model, optimizer)
+    helper = ModelHelper(model, optimizer, ema_beta=config["training"]["model_ema"])
 
     if config["tools"]["load_model_save_name"] != "":
-        helper.load_model(config["tools"]["model_save_directory"], config["tools"]["load_model_save_name"])
+        helper.load_model(config["tools"]["model_save_directory"], config["tools"]["load_model_save_name"], load_optimizer=config["tools"]["load_optimizer"])
 
     size = helper.get_parameter_count()
     print(f"Model Size: {size}")
@@ -79,19 +88,19 @@ def initialize(config):
 def training(config):
     model, helper, (dataset, train_loader, test_loader) = initialize(config)
     print("Running Training...")
-    if config["training"]["is_training"]:
-        helper.train_model(
-            train_loader=train_loader,
-            test_loader=test_loader,
-            epochs=config["training"]["epochs"],
-            accumulation_steps=config["training"]["accumulation_steps"],
-            pl_scale=config["training"]["perceptual_loss_scale"],
-            fft_loss_scale=config["training"]["fft_loss_scale"],
-            log=config["tools"]["log"],
-            save_model_every_i_epoch=config["tools"]["save_model_every_i_epoch"],
-            save_path=config["tools"]["model_save_directory"],
-            dataset=dataset
-        )
+    helper.train_model(
+        train_loader=train_loader,
+        test_loader=test_loader,
+        epochs=config["training"]["epochs"],
+        accumulation_steps=config["training"]["accumulation_steps"],
+        pl_scale=config["training"]["perceptual_loss_scale"],
+        fft_loss_scale=config["training"]["fft_loss_scale"],
+        ema_start_epoch=config["training"]["ema_start_epoch"],
+        log=config["tools"]["log"],
+        save_model_every_i_epoch=config["tools"]["save_model_every_i_epoch"],
+        save_path=config["tools"]["model_save_directory"],
+        dataset=dataset
+    )
 
 
 def sample_images(config, count):
@@ -102,9 +111,11 @@ def sample_images(config, count):
 def test(config):
     model, helper, (dataset, train_loader, test_loader) = initialize(config)
     hr_p, hr = helper.sample_model(random_sample=3, dataset=dataset)
-    t1 = calculate_psnr(hr_p, hr).mean().item()
-    t2 = calculate_ssim(hr_p, hr).item()
-    print()
+    t1 = calculate_psnr(hr_p, hr)
+    t2 = calculate_ssim(hr_p, hr)
+    from utils import save_images_comparison
+    save_images_comparison(hr_p, hr)
+    print(t1, t2)
 
 
 if __name__ == '__main__':

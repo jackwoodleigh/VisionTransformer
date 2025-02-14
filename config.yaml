@@ -6,20 +6,24 @@ model:
   scale_factor: 4
 
 training:
-  is_training: True
-  epochs: 200
-  batch_size: 2
+  learning_rate: 0.001
+  epochs: 1000
+  batch_size: 4
   accumulation_steps: 16
-  learning_rate: 0.002
+  perceptual_loss_scale: 0.005
+  fft_loss_scale: 0.05
+  model_ema: 0.995
+  ema_start_epoch: 3
+  data_subset: 0
   testing_data_split: 0.1
   image_height: 1080
   image_width: 1920
-  perceptual_loss_scale: 0.03
-  fft_loss_scale: 0.05
+  transform_data: True
 
 tools:
   log: True
   model_save_directory: "Model Saves"
   load_model_save_name: ""
   save_model_every_i_epoch: 1
+  load_optimizer: True
 
