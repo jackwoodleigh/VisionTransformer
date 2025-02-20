@@ -15,8 +15,8 @@ class ParameterEMA:
             return new
         return old * self.beta + (1 - self.beta) * new
 
-    def step_ema(self, ema_model, model, start_step=2000):
-        if self.step < start_step:
+    def step_ema(self, ema_model, model, start_step=2000, new_ema=True):
+        if self.step < start_step and new_ema:
             self.set_parameters(ema_model, model)
             self.step += 1
             return

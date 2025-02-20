@@ -104,16 +104,17 @@ class ModelHelper:
 
         torch.cuda.synchronize()
         time.sleep(2)
-
-        for e in range(epochs):
+        train_itr = iter(train_loader)
+        for itr in range(10000):
             epoch_training_losses = []
             epoch_validation_losses = []
             loss_accumulator = 0
             self.model.train()
 
             # Training
-            pbar = tqdm(train_loader, desc=f"Training - Epoch {e+1}/{epochs}", leave=True, dynamic_ncols=True)
+            #pbar = tqdm(train_loader, desc=f"Training - Epoch {e+1}/{epochs}", leave=True, dynamic_ncols=True)
             for i, (hr, lr) in enumerate(pbar):
+                hr, lr =
                 loss, _ = self.predict(hr, lr, pl_scale, fft_loss_scale)
                 loss /= accumulation_steps
                 loss_accumulator += loss.item()

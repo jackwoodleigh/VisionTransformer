@@ -6,6 +6,10 @@ from torch.utils.checkpoint import checkpoint
 
 # https://arxiv.org/pdf/2409.03516
 
+# https://arxiv.org/pdf/2208.11247v3
+# https://arxiv.org/pdf/2404.00722v5
+# https://arxiv.org/pdf/2205.04437v3 maybe try out lam
+
 class CCM(nn.Module):
     def __init__(self, dim, growth_rate=2.0):
         super().__init__()
