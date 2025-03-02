@@ -1,29 +1,36 @@
 model:
   n_blocks: 8
   levels: 4
-  dim: 60
+  dim: 64
+  features: 32
   window_size: 8
   scale_factor: 4
 
 training:
-  learning_rate: 0.0001
-  epochs: 2258
-  batch_size: 2
-  accumulation_steps: 8
-  perceptual_loss_scale: 0.005
-  fft_loss_scale: 0.01
-  model_ema: 0.9975
-  ema_start_epoch: 3
+  learning_rate: 0.001
+  iterations: 500000
+  epochs: 100
+  batch_size: 32
+  accumulation_steps: 2
+  model_ema: 0.9995
+  ema_start_epoch: 2
+  criterion:
+    CharbonnierLoss: 1
+    FFTLoss: 0.025
+
+data:
   data_subset: 0
-  testing_data_split: 0.1
-  image_height: 1080
-  image_width: 1920
+  training_dataset_enlarge_scale: 10
+  training_image_size: 256
+  validation_image_size: 1080
   transform_data: True
 
 tools:
   log: True
-  model_save_directory: "Model Saves"
-  load_model_save_name: "model_save_epoch_133.pth"
+  save_path: "Model Saves"
+  save_name: ""
+  load_model_save_name: ""
   save_model_every_i_epoch: 1
-  load_optimizer: True
+  load_optimizer: False
+  multi_gpu_enable: True
 

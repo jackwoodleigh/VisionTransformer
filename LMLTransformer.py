@@ -1,3 +1,5 @@
+import math
+
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -9,6 +11,11 @@ from torch.utils.checkpoint import checkpoint
 # https://arxiv.org/pdf/2208.11247v3
 # https://arxiv.org/pdf/2404.00722v5
 # https://arxiv.org/pdf/2205.04437v3 maybe try out lam
+
+class FConv(nn.Module):
+    def __init__(self):
+        super.__init__()
+
 
 class CCM(nn.Module):
     def __init__(self, dim, growth_rate=2.0):
@@ -109,6 +116,17 @@ class LHSABlock(nn.Module):
 
         self.activation = nn.GELU()
 
+        self.upsample_1st = nn.ModuleList([nn.Conv2d(dim // levels, (dim // levels) * (2 ** 2), kernel_size=3, stride=1, padding=1) for _ in range(levels)])
+        self.pixel_shuffle = nn.PixelShuffle(2)
+
+        self.upsample_2nd = nn.ModuleList([])
+        for i in range(levels)[1:-1]:
+            scale = 2**i
+            self.upsample_2nd.append(nn.Sequential(
+                nn.Conv2d(dim // levels, (dim // levels) * (scale ** 2), kernel_size=3, stride=1, padding=1),
+                nn.PixelShuffle(scale)
+            ))
+
     # passing in B, H, W, C
     # returning  B, H, W, C
     def forward(self, x):
@@ -138,13 +156,16 @@ class LHSABlock(nn.Module):
 
             if i > 0:
                 # interpolating it the size of the layer above
-                z_up = F.interpolate(z, size=(z.shape[2] * 2, z.shape[3] * 2), mode='bicubic')
+                #z_up = F.interpolate(z, size=(z.shape[2] * 2, z.shape[3] * 2), mode='bicubic')
+                z = self.pixel_shuffle(self.upsample_1st[self.levels-1-i](z))
 
                 # adding elementwise the up-sampled feature map for increased detail
-                downsampled_maps[i - 1] = downsampled_maps[i - 1] + z_up
+                downsampled_maps[i - 1] = downsampled_maps[i - 1] + z
 
                 # interpolating image back to original H*W feature map size and returning
-                z = F.interpolate(z_up, size=(H, W), mode='bicubic')
+                #z = F.interpolate(z_up, size=(H, W), mode='bicubic')
+                if i > 1:
+                    z = self.upsample_2nd[i-2](z)
 
             out_maps.append(z)
 
@@ -176,23 +197,31 @@ class LMLTBlock(nn.Module):
 
 
 class LMLTransformer(nn.Module):
-    def __init__(self, n_blocks, levels, window_size, dim, scale_factor, ffn_scale=2.0):
+    def __init__(self, n_blocks, levels, window_size, dim, features, scale_factor, ffn_scale=2.0):
         super().__init__()
         self.depth = n_blocks
         self.LHSA_levels = levels
         self.dim = dim
+        self.features = features
         self.scale_factor = scale_factor
         self.window_size = window_size
 
         self.feature_extractor = nn.Conv2d(3, dim, 3, 1, 1)
 
-        self.layers = nn.Sequential(
-            *[LMLTBlock(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale) for _ in range(n_blocks)])
+        self.layers = nn.Sequential(*[LMLTBlock(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale) for _ in range(n_blocks)])
 
-        # convert from dim -> color scale * img scale factor and uses pixel shuffle to organize image
         self.img_reconstruction = nn.Sequential(
-            nn.Conv2d(dim, 3 * scale_factor ** 2, 3, 1, 1),
-            nn.PixelShuffle(scale_factor)
+            nn.Conv2d(dim, features, 3, 1, 1),
+            nn.GELU(),
+            nn.Conv2d(features, features, 3, 1, 1),
+
+            nn.Conv2d(features, features * scale_factor**2, 3, 1, 1),
+            nn.PixelShuffle(scale_factor),
+            nn.GELU(),
+
+            nn.Conv2d(features, features, 3, 1, 1),
+            nn.GELU(),
+            nn.Conv2d(features, 3, 3, 1, 1, )
         )
 
     def padding(self, x):

@@ -1,4 +1,5 @@
 import torch
+import torchvision
 from torch.utils.data import Dataset, Subset
 from torchvision import transforms, datasets
 import torch.nn.functional as F
@@ -10,11 +11,11 @@ import numpy as np
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 
 class SuperResolutionDataset(Dataset):
-    def __init__(self, root, scale_values, transform, subset=None):
+    def __init__(self, root, scale_values, transform, enlarge_factor=1, subset=None):
         self.root = root
         self.scale_values = scale_values
-
         self.transform = transform
+        self.enlarge_factor = enlarge_factor
 
         self.dataset = datasets.ImageFolder(root=root)
 
@@ -23,13 +24,19 @@ class SuperResolutionDataset(Dataset):
             self.dataset = Subset(self.dataset, subset_indices)
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.dataset) * self.enlarge_factor
 
     def __getitem__(self, idx):
+        idx = idx % len(self.dataset)
         hr_img, _ = self.dataset[idx]
         hr_img = self.transform(hr_img)
         lr_img = F.interpolate(hr_img.unsqueeze(0), scale_factor=(1 / self.scale_values), mode='bicubic')
         return hr_img, lr_img.squeeze(0)
+
+def infinite_dataloader(dataloader):
+    while True:
+        for batch in dataloader:
+            yield batch
 
 def denormalize_image(img, mean, std):
     device = img.device
@@ -46,6 +53,15 @@ def save_images_comparison(hr_p, hr, filename="comparison.png", denorm=True):
     comparison = torch.cat((hr, hr_p), dim=-1)
     vutils.save_image(comparison, filename, nrow=hr.shape[0])
     print("Saved Image Comparison.")
+
+def save_images_comparison2(hr_p, hr, filename="comparison.png", denorm=True):
+    if denorm:
+        hr_p = denormalize_image(hr_p, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
+        hr = denormalize_image(hr, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
+    comparison = torch.cat((hr, hr_p), dim=-1)
+    torchvision.utils.save_image(comparison, 'grid_image_direct.png', nrow=1, padding=2, normalize=True)
+    print("Saved Image Comparison.")
+
 
 def save_images(tensor, filename="images.png", denorm=True):
     if denorm:
@@ -86,3 +102,4 @@ def calculate_ssim(hr_p, hr, denorm=False):
 
     ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(hr_p.device)
     return ssim(hr_p, hr)
+

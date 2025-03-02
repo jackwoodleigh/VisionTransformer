@@ -1,8 +1,9 @@
 import torch
 class ParameterEMA:
-    def __init__(self, beta=0.995):
+    def __init__(self, start_step=2000, beta=0.995):
         super().__init__()
         self.beta = beta
+        self.start_step = start_step
         self.step = 0
 
     def update_model_average(self, ema_model, current_model):
@@ -15,8 +16,8 @@ class ParameterEMA:
             return new
         return old * self.beta + (1 - self.beta) * new
 
-    def step_ema(self, ema_model, model, start_step=2000, new_ema=True):
-        if self.step < start_step and new_ema:
+    def step_ema(self, ema_model, model, new_ema=True):
+        if self.step < self.start_step and new_ema:
             self.set_parameters(ema_model, model)
             self.step += 1
             return

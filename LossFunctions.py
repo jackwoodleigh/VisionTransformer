@@ -1,9 +1,10 @@
-
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
 import torchvision.models as models
 from utils import denormalize_image
+
 
 class PerceptualLoss(nn.Module):
     def __init__(self, layer_index=12):
@@ -18,6 +19,7 @@ class PerceptualLoss(nn.Module):
 
     def norm(self, x):
         return (x - self.mean.to(x.device)) / self.std.to(x.device)
+
     def forward(self, predicted, target):
         predicted = denormalize_image(predicted, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
         target = denormalize_image(target, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
@@ -40,4 +42,42 @@ class FFTLoss(nn.Module):
 
         return self.loss_fn(predicted_fft, target_fft)
 
+class CharbonnierLoss(nn.Module):
+    def __init__(self, epsilon=1e-6):
+        super().__init__()
+        self.epsilon = epsilon
+
+    def forward(self, prediction, target):
+        diff = prediction - target
+        loss = torch.sqrt(diff * diff + self.epsilon * self.epsilon)
+        return torch.mean(loss)
+
+class Criterion(nn.Module):
+    def __init__(self, losses):
+        super().__init__()
+        self.losses = []
+        if "L1" in losses:
+            self.losses.append([nn.L1Loss(), losses["L1"]])
+        if "L2" in losses:
+            self.losses.append([nn.MSELoss(), losses["L2"]])
+        if "CharbonnierLoss" in losses:
+            self.losses.append([CharbonnierLoss(), losses["CharbonnierLoss"]])
+        if "PerceptualLoss" in losses:
+            self.losses.append([PerceptualLoss(), losses["PerceptualLoss"]])
+        if "FFTLoss" in losses:
+            self.losses.append([FFTLoss(), losses["FFTLoss"]])
+    def forward(self, predicted, target):
+        total_loss = 0
+        for loss, loss_weight in self.losses:
+            total_loss += loss_weight * loss(predicted, target)
+        return total_loss
+
+
+
+
+
+
 # https://www.sciencedirect.com/science/article/pii/S0031320323002108 patch loss
+
+# https://github.com/jonbarron/robust_loss_pytorch/tree/master
+

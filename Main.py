@@ -1,7 +1,12 @@
+import os
 import random
+
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
+from tqdm import tqdm
+
 from LMLTransformer import LMLTransformer
 from ModelHelper import ModelHelper
 from utils import SuperResolutionDataset
@@ -9,17 +14,21 @@ import yaml
 import warnings
 from utils import calculate_psnr, calculate_ssim
 import torchvision.transforms.functional as F
+from LossFunctions import Criterion
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
 
 
-# TODO add patch loss
-# TODO add an EMA
-# TODO add diffusion refinement
-
-class PadTo1080:
+class PadImg:
+    def __init__(self, size):
+        self.final_width = size
+        self.final_height = size
     def __call__(self, img):
         w, h = img.size
-        pad_w = max(0, 1080 - w)
-        pad_h = max(0, 1080 - h)
+        pad_w = max(0, self.final_width - w)
+        pad_h = max(0, self.final_height - h)
         padding = (pad_w // 2, pad_h // 2, pad_w - (pad_w // 2), pad_h - (pad_h // 2))
         img = F.pad(img, padding, padding_mode='reflect')
         return img
@@ -29,15 +38,14 @@ def rotate_if_wide(img):
         return img.rotate(-90, expand=True)
     return img
 
-def initialize(config):
-    warnings.filterwarnings("ignore", message=".*compiled with flash attention.*")
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cudnn.deterministic = False
+def load_dataset(config, rank=0):
+    training_pad_transform = PadImg(config["data"]["training_image_size"])
+    validation_pad_transform = PadImg(config["data"]["validation_image_size"])
 
-    if config["training"]["transform_data"]:
+    if config["data"]["transform_data"]:
         transform = transforms.Compose([
-            PadTo1080(),
-            transforms.RandomCrop(config["training"]["image_height"]),
+            training_pad_transform,
+            transforms.RandomCrop(config["data"]["training_image_size"]),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomRotation(degrees=[-90, 90]),
             transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
@@ -46,76 +54,114 @@ def initialize(config):
         ])
     else:
         transform = transforms.Compose([
-            transforms.Lambda(rotate_if_wide),
-            transforms.CenterCrop((config["training"]["image_height"], config["training"]["image_width"])),
+            training_pad_transform,
+            transforms.RandomCrop(config["data"]["training_image_size"]),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
         ])
 
-    if config["training"]["data_subset"] != 0:
-        print(f"Using a subset of {config["training"]["data_subset"]} images.")
-        dataset = SuperResolutionDataset(root='./data/train', scale_values=config["model"]["scale_factor"], transform=transform, subset=config["training"]["data_subset"])
+    if config["data"]["data_subset"] != 0:
+        sub = config["data"]["data_subset"]
+        if rank == 0:
+            print(f"Using a subset of {sub} images.")
+        train_dataset = SuperResolutionDataset(root='./data/train', scale_values=config["model"]["scale_factor"], transform=transform, enlarge_factor=config["data"]["training_dataset_enlarge_scale"], subset=config["data"]["data_subset"])
+
     else:
-        dataset = SuperResolutionDataset(root='./data/train', scale_values=config["model"]["scale_factor"], transform=transform)
+        train_dataset = SuperResolutionDataset(root='./data/train', scale_values=config["model"]["scale_factor"], transform=transform, enlarge_factor=config["data"]["training_dataset_enlarge_scale"])
 
-    test_size = int(len(dataset) * config["training"]["testing_data_split"])
-    train_size = len(dataset) - test_size
+    test_dataset = SuperResolutionDataset(root='./data/test', scale_values=config["model"]["scale_factor"], transform=transforms.Compose([validation_pad_transform, transforms.RandomCrop(config["data"]["validation_image_size"]), transforms.ToTensor(), transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])]))
 
-    train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
+    return train_dataset, test_dataset
 
-    train_loader = DataLoader(train_dataset, batch_size=config["training"]["batch_size"], shuffle=True, num_workers=4, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=config["training"]["batch_size"], shuffle=True, num_workers=4, pin_memory=True)
+
+def initialize(config, rank=0, world_size=0):
+    warnings.filterwarnings("ignore", message=".*compiled with flash attention.*")
+    #torch.backends.cudnn.benchmark = True
+    #torch.backends.cudnn.deterministic = False
+
+    multi_gpu = False
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        if rank == 0:
+            print("Total GPUs in usage: ", torch.cuda.device_count())
+
+        multi_gpu = True
+        #os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        #os.environ.setdefault("MASTER_PORT", "29500")
+        dist.init_process_group(backend='nccl', init_method="tcp://127.0.0.1:29500", rank=rank, world_size=world_size)
+        torch.cuda.set_device(rank)
 
     model = LMLTransformer(
         n_blocks=config["model"]["n_blocks"],
         levels=config["model"]["levels"], window_size=config["model"]["n_blocks"],
         dim=config["model"]["dim"],
+        features=config["model"]["features"],
         scale_factor=config["model"]["scale_factor"]
     )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config["training"]["learning_rate"])
+    model = model.to(f"cuda:{rank}")
+    if multi_gpu:
+        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
-    helper = ModelHelper(model, optimizer, ema_beta=config["training"]["model_ema"])
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config["training"]["learning_rate"], betas=(0.9, 0.99))
+    criterion = Criterion(config["training"]["criterion"])
 
+    helper = ModelHelper(model, optimizer, criterion, ema_beta=config["training"]["model_ema"], multi_gpu=multi_gpu)
+
+    # Loading Save
     if config["tools"]["load_model_save_name"] != "":
         helper.load_model(config["tools"]["model_save_directory"], config["tools"]["load_model_save_name"], load_optimizer=config["tools"]["load_optimizer"])
 
     size = helper.get_parameter_count()
-    print(f"Model Size: {size}")
+    if rank == 0:
+        print(f"Model Size: {size}")
 
-    return model, helper, (dataset, train_loader, test_loader)
+    # Loading Data
+    train_dataset, test_dataset = load_dataset(config)
 
-def training(config):
-    model, helper, (dataset, train_loader, test_loader) = initialize(config)
-    print("Running Training...")
+    sampler = None
+    if multi_gpu:
+        sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
+
+    train_loader = DataLoader(train_dataset, batch_size=config["training"]["batch_size"], shuffle=(sampler is None), num_workers=12, pin_memory=True, sampler=sampler)
+    test_loader = DataLoader(test_dataset, batch_size=2, shuffle=True, num_workers=12, pin_memory=True)
+
+    return model, helper, (train_dataset, test_dataset, sampler, train_loader, test_loader)
+
+def training(rank, config, world_size=0):
+    model, helper, (train_dataset, test_dataset, sampler, train_loader, test_loader) = initialize(config, rank, world_size)
+    if rank == 0:
+        print("Running Training...")
     helper.train_model(
         train_loader=train_loader,
         test_loader=test_loader,
-        epochs=config["training"]["epochs"],
-        accumulation_steps=config["training"]["accumulation_steps"],
-        pl_scale=config["training"]["perceptual_loss_scale"],
-        fft_loss_scale=config["training"]["fft_loss_scale"],
-        ema_start_epoch=config["training"]["ema_start_epoch"],
-        log=config["tools"]["log"],
-        save_model_every_i_epoch=config["tools"]["save_model_every_i_epoch"],
-        save_path=config["tools"]["model_save_directory"],
-        dataset=dataset
+        config=config,
+        train_dataset=train_dataset,
+        test_dataset=test_dataset
     )
-
+    if world_size != 0:
+        dist.destroy_process_group()
 
 def sample_images(config, count):
-    model, helper, (dataset, train_loader, test_loader) = initialize(config)
+    model, helper, (train_dataset, test_dataset, train_loader, test_loader) = initialize(config)
     print("Running Image Sampling...")
-    helper.sample_model(random_sample=count, dataset=dataset, save_img=True)
+    helper.sample_model(random_sample=count, dataset=train_dataset, save_img=True)
 
 def test(config):
     model, helper, (dataset, train_loader, test_loader) = initialize(config)
-    hr_p, hr = helper.sample_model(random_sample=3, dataset=dataset)
-    t1 = calculate_psnr(hr_p, hr)
-    t2 = calculate_ssim(hr_p, hr)
-    from utils import save_images_comparison
-    save_images_comparison(hr_p, hr)
-    print(t1, t2)
+    #helper.sample_model(random_sample=3, dataset=dataset, save_img=True, save_compare=True, use_ema_model=False)
+    ssim = []
+    psnr = []
+    # Validation
+    with torch.no_grad():
+        #pbar = tqdm(test_loader, desc=f"Validating - Epoch {e + 1}/{epochs}", leave=True, dynamic_ncols=True)
+        for i, (hr, lr) in tqdm(enumerate(train_loader)):
+            loss, hr_p = helper.predict(hr, lr, use_ema_model=True)
+
+            hr = hr.to("cuda")
+            ssim.append(calculate_ssim(hr_p.float(), hr.float()).item())
+            psnr.append(calculate_psnr(hr_p.float(), hr.float()).mean().item())
+    print(np.mean(ssim))
+    print(np.mean(psnr))
 
 
 if __name__ == '__main__':
@@ -131,9 +177,14 @@ if __name__ == '__main__':
             config=config
         )
         run_name = wandb.run.name
+        config["tools"]["run_name"] = run_name
 
-    #test(config)
-    training(config)
+    # Training
+    if config["tools"]["multi_gpu_enable"] and torch.cuda.device_count() > 1:
+        world_size = torch.cuda.device_count()
+        mp.spawn(training, args=(config, world_size,), nprocs=world_size, join=True)
+    else:
+        training(config=config, rank=0, world_size=0)
 
     #training(config)
 
