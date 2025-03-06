@@ -1,5 +1,6 @@
 import math
 
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -16,6 +17,27 @@ class FConv(nn.Module):
     def __init__(self):
         super.__init__()
 
+class LayerNorm(nn.Module):
+    def __init__(self, normalized_shape, eps=1e-6, data_format="channels_first"):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(normalized_shape))
+        self.bias = nn.Parameter(torch.zeros(normalized_shape))
+        self.eps = eps
+        self.data_format = data_format
+        if self.data_format not in ["channels_last", "channels_first"]:
+            raise NotImplementedError
+        self.normalized_shape = (normalized_shape, )
+
+    def forward(self, x):
+        if self.data_format == "channels_last":
+            return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
+        elif self.data_format == "channels_first":
+            u = x.mean(1, keepdim=True)
+            s = (x - u).pow(2).mean(1, keepdim=True)
+            x = (x - u) / torch.sqrt(s + self.eps)
+            x = self.weight[:, None, None] * x + self.bias[:, None, None]
+            return x
+
 
 class CCM(nn.Module):
     def __init__(self, dim, growth_rate=2.0):
@@ -30,10 +52,7 @@ class CCM(nn.Module):
 
     # B, H, W, C - input and output
     def forward(self, x):
-        B, H, W, C = x.size()
-        x = x.view(B, C, H, W)
         x = self.ccm(x)
-        x = x.view(B, H, W, C)
         return x
 
 
@@ -47,25 +66,19 @@ class ViTBlock(nn.Module):
         self.pe_encoder = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim)
         self.out_proj = nn.Linear(dim, dim)
 
-    # output: B, C, H, W
+    # output: B, H, W, C
     # input: N, window_size^2, C
     def window_partition(self, x):
-        B, C, H, W = x.shape
-        # B, n_h_windows, window size, n_w_windows, window size, C -> B, n_h_windows, n_w_windows, window size, window size, C
-        # then merge batch and number of windows
+        B, H, W, C = x.shape
         x = x.view(B, H // self.window_size, self.window_size, W // self.window_size, self.window_size, C)
-        x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
-        x = x.view(-1, self.window_size * self.window_size, C)
-        return x
+        return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, self.window_size, self.window_size, C).view(-1, self.window_size * self.window_size, C)
 
     # input: N, window_size^2, C
-    # output: B, C, H, W
+    # output: B, H, W, C
     def reverse_window_partition(self, x, h, w):
-        # inverse of window create
-        b = x.shape[0] // ((w // self.window_size) * (h // self.window_size))
-        x = x.view(b, self.window_size, self.window_size, -1)
+        b = int(x.shape[0] / (w * h / self.window_size / self.window_size))
         x = x.view(b, h // self.window_size, w // self.window_size, self.window_size, self.window_size, -1)
-        return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(b, -1, h, w)
+        return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(b, h, w, -1)
 
     # input: -1, window_size^2, C
     def locally_enhanced_pe(self, x, func):
@@ -85,9 +98,10 @@ class ViTBlock(nn.Module):
     # 1, 3, 16, 16 = x
     def forward(self, x):
         B, C, H, W = x.shape
+        x = x.permute(0, 2, 3, 1)
 
         # convert to windows
-        # B, C, H, W -> N, window_size^2, C
+        # B, H, W, C -> N, window_size^2, C
         x = self.window_partition(x)
 
         # q,k,v: N, window_size^2, C
@@ -102,7 +116,7 @@ class ViTBlock(nn.Module):
         x = self.out_proj(x)
         x = self.reverse_window_partition(x, H, W)
 
-        return x
+        return x.permute(0, 3, 1, 2)
 
 
 class LHSABlock(nn.Module):
@@ -116,22 +130,27 @@ class LHSABlock(nn.Module):
 
         self.activation = nn.GELU()
 
-        self.upsample_1st = nn.ModuleList([nn.Conv2d(dim // levels, (dim // levels) * (2 ** 2), kernel_size=3, stride=1, padding=1) for _ in range(levels)])
+        self.upsample_1st = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(dim // levels, (dim // levels) * (2 ** 2), kernel_size=3, stride=1, padding=1),
+                nn.PixelShuffle(2),
+                nn.GELU(),
+                nn.Conv2d(dim // levels, (dim // levels), 3, 1, 1)
+
+            ) for _ in range(levels)])
+
         self.pixel_shuffle = nn.PixelShuffle(2)
 
-        self.upsample_2nd = nn.ModuleList([])
+        '''self.upsample_2nd = nn.ModuleList([])
         for i in range(levels)[1:-1]:
             scale = 2**i
             self.upsample_2nd.append(nn.Sequential(
                 nn.Conv2d(dim // levels, (dim // levels) * (scale ** 2), kernel_size=3, stride=1, padding=1),
                 nn.PixelShuffle(scale)
-            ))
+            ))'''
 
-    # passing in B, H, W, C
-    # returning  B, H, W, C
     def forward(self, x):
-        B, H, W, C = x.size()
-        x = x.view(B, C, H, W)
+        B, C, H, W = x.size()
 
         # we chunk the features into levels
         x_chunked = x.chunk(self.levels, dim=1)
@@ -153,19 +172,19 @@ class LHSABlock(nn.Module):
         out_maps = []
         for i in reversed(range(self.levels)):
             z = self.vit[i](downsampled_maps[i])
-
             if i > 0:
                 # interpolating it the size of the layer above
-                #z_up = F.interpolate(z, size=(z.shape[2] * 2, z.shape[3] * 2), mode='bicubic')
-                z = self.pixel_shuffle(self.upsample_1st[self.levels-1-i](z))
+                #z = F.interpolate(z, size=(z.shape[2] * 2, z.shape[3] * 2), mode='nearest')
+                #z = self.pixel_shuffle(self.upsample_1st[self.levels-1-i](z))
+                z = self.upsample_1st[self.levels-1-i](z)
 
                 # adding elementwise the up-sampled feature map for increased detail
                 downsampled_maps[i - 1] = downsampled_maps[i - 1] + z
 
                 # interpolating image back to original H*W feature map size and returning
-                #z = F.interpolate(z_up, size=(H, W), mode='bicubic')
-                if i > 1:
-                    z = self.upsample_2nd[i-2](z)
+                z = F.interpolate(z, size=(H, W), mode='nearest')
+                '''if i > 1:
+                    z = self.upsample_2nd[i-2](z)'''
 
             out_maps.append(z)
 
@@ -175,9 +194,6 @@ class LHSABlock(nn.Module):
         # multiplicative residual connection for less dependency on original.
         out_maps = self.activation(out_maps) * x
 
-        # returns to B,C,H,W -> B, H, W, C
-        out_maps = out_maps.view(B, H, W, C)
-
         return out_maps
 
 
@@ -186,9 +202,8 @@ class LMLTBlock(nn.Module):
         super().__init__()
         self.LHSA = LHSABlock(levels=levels, dim=dim, window_size=window_size)
         self.CCM = CCM(dim, ffn_scale)
-        self.ln1 = nn.LayerNorm(dim)
-        self.ln2 = nn.LayerNorm(dim)
-        self.rezero_weight = nn.Parameter(torch.zeros(1))
+        self.ln1 = LayerNorm(dim)
+        self.ln2 = LayerNorm(dim)
 
     def forward(self, x):
         x = self.LHSA(self.ln1(x)) + x
@@ -210,19 +225,24 @@ class LMLTransformer(nn.Module):
 
         self.layers = nn.Sequential(*[LMLTBlock(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale) for _ in range(n_blocks)])
 
-        self.img_reconstruction = nn.Sequential(
+        img_reconstruction = [
             nn.Conv2d(dim, features, 3, 1, 1),
             nn.GELU(),
             nn.Conv2d(features, features, 3, 1, 1),
-
-            nn.Conv2d(features, features * scale_factor**2, 3, 1, 1),
-            nn.PixelShuffle(scale_factor),
-            nn.GELU(),
-
+        ]
+        for i in range(int(np.log2(scale_factor))):
+            img_reconstruction.extend([
+                nn.Conv2d(features, features * 4, 3, 1, 1),
+                nn.PixelShuffle(2),
+                nn.GELU(),
+            ])
+        img_reconstruction.extend([
             nn.Conv2d(features, features, 3, 1, 1),
             nn.GELU(),
             nn.Conv2d(features, 3, 3, 1, 1, )
-        )
+        ])
+
+        self.img_reconstruction = nn.Sequential(*img_reconstruction)
 
     def padding(self, x):
         _, _, h, w = x.size()
@@ -235,20 +255,16 @@ class LMLTransformer(nn.Module):
 
     # 1, 3, 16, 16 = x
     def forward(self, x):
-        _, _, orig_H, orig_W = x.shape
-
-        x = self.padding(x)
         B, C, H, W = x.shape
 
-        # B, dim, H, W,
+        x = self.padding(x)
+
         x = self.feature_extractor(x)
 
-        x = x.view(B, H, W, self.dim)
         x = self.layers(x) + x
-        x = x.view(B, self.dim, H, W)
 
         # crop padding
-        x = x[:, :, :orig_H, :orig_W]
+        x = x[:, :, :H, :W]
 
         x = self.img_reconstruction(x)
 

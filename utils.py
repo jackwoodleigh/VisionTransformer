@@ -1,3 +1,8 @@
+import io
+import os
+from os import path as osp
+
+import cv2
 import torch
 import torchvision
 from torch.utils.data import Dataset, Subset
@@ -9,34 +14,87 @@ from torchvision import transforms
 from PIL import Image
 import numpy as np
 from torchmetrics.image import StructuralSimilarityIndexMeasure
+import lmdb
+
 
 class SuperResolutionDataset(Dataset):
-    def __init__(self, root, scale_values, transform, enlarge_factor=1, subset=None):
+    def __init__(self, root, scale_values, transform=None, use_lmdb=False, enlarge_factor=1, subset=0):
         self.root = root
         self.scale_values = scale_values
         self.transform = transform
         self.enlarge_factor = enlarge_factor
+        self.use_lmdb = use_lmdb
+        self.env = None
 
-        self.dataset = datasets.ImageFolder(root=root)
+        if use_lmdb:
+            self.n = len(get_keys(self.root))
+            if subset != 0:
+                assert self.n > subset
+                self.n = subset
 
-        if subset is not None:
-            subset_indices = list(range(subset))
-            self.dataset = Subset(self.dataset, subset_indices)
+        else:
+            self.dataset = datasets.ImageFolder(root=root)
+
+            if subset != 0:
+                subset_indices = list(range(subset))
+                self.dataset = Subset(self.dataset, subset_indices)
+
+            self.n = len(self.dataset)
+
+    def open_env(self):
+        if self.env is None:
+            self.env = lmdb.open(
+                self.root,
+                readonly=True,
+                lock=False,
+                readahead=False,
+                meminit=False
+            )
+
+    def __del__(self):
+        if hasattr(self, 'env') and self.env is not None:
+            self.env.close()
+            self.env = None
 
     def __len__(self):
-        return len(self.dataset) * self.enlarge_factor
+        return self.n * self.enlarge_factor
 
     def __getitem__(self, idx):
-        idx = idx % len(self.dataset)
-        hr_img, _ = self.dataset[idx]
-        hr_img = self.transform(hr_img)
-        lr_img = F.interpolate(hr_img.unsqueeze(0), scale_factor=(1 / self.scale_values), mode='bicubic')
+        idx = idx % self.n
+
+        if self.use_lmdb:
+            self.open_env()
+            key = f"{idx:08d}".encode('ascii')
+
+            with self.env.begin() as txn:
+                img_bytes = txn.get(key)
+                if img_bytes is None:
+                    raise KeyError(f"Key {key} not found in LMDB!")
+
+            nparr = np.frombuffer(img_bytes, np.uint8)
+            img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            hr_img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            hr_img = Image.fromarray(hr_img)
+
+            if self.transform is not None:
+                hr_img = self.transform(hr_img)
+
+            lr_img = F.interpolate(hr_img.unsqueeze(0), scale_factor=(1 / self.scale_values), mode='bicubic')
+
+        else:
+            hr_img, _ = self.dataset[idx]
+            if self.transform is not None:
+                hr_img = self.transform(hr_img)
+            lr_img = F.interpolate(hr_img.unsqueeze(0), scale_factor=(1 / self.scale_values), mode='bicubic')
+
         return hr_img, lr_img.squeeze(0)
+
 
 def infinite_dataloader(dataloader):
     while True:
         for batch in dataloader:
             yield batch
+
 
 def denormalize_image(img, mean, std):
     device = img.device
@@ -103,3 +161,47 @@ def calculate_ssim(hr_p, hr, denorm=False):
     ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(hr_p.device)
     return ssim(hr_p, hr)
 
+def scandir(dir_path, suffix=None, recursive=False, full_path=False):
+    if (suffix is not None) and not isinstance(suffix, (str, tuple)):
+        raise TypeError('"suffix" must be a string or tuple of strings')
+    root = dir_path
+
+    def _scandir(dir_path, suffix, recursive):
+        for entry in os.scandir(dir_path):
+            if not entry.name.startswith('.') and entry.is_file():
+                if full_path:
+                    return_path = entry.path
+                else:
+                    return_path = osp.relpath(entry.path, root)
+
+                if suffix is None:
+                    yield return_path
+                elif return_path.endswith(suffix):
+                    yield return_path
+            else:
+                if recursive:
+                    yield from _scandir(entry.path, suffix=suffix, recursive=recursive)
+                else:
+                    continue
+
+    return _scandir(dir_path, suffix=suffix, recursive=recursive)
+
+def read_from_lmdb(lmdb_path, key):
+    env = lmdb.open(lmdb_path, readonly=True, lock=False)
+    with env.begin() as txn:
+        data = txn.get(key.encode('ascii'))
+        if data is None:
+            print("Key not found!")
+            return None
+        img_array = np.frombuffer(data, dtype=np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_UNCHANGED)
+    env.close()
+    return img
+
+def get_keys(lmdb_path):
+    env = lmdb.open(lmdb_path, readonly=True, lock=False)
+    with env.begin() as txn:
+        total_images = int(txn.get(b'__len__').decode('utf-8'))
+        keys = {i: f"{i:08d}" for i in range(total_images)}
+    env.close()
+    return keys

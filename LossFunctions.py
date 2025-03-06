@@ -34,8 +34,8 @@ class FFTLoss(nn.Module):
         self.loss_fn = loss_fn
 
     def forward(self, predicted, target):
-        predicted_fft = torch.fft.rfft2(predicted.float(), norm='ortho')
-        target_fft = torch.fft.rfft2(target.float(), norm='ortho')
+        predicted_fft = torch.fft.rfft2(predicted.float())
+        target_fft = torch.fft.rfft2(target.float())
 
         predicted_fft = torch.stack([predicted_fft.real, predicted_fft.imag], dim=-1)
         target_fft = torch.stack([target_fft.real, target_fft.imag], dim=-1)
@@ -43,7 +43,7 @@ class FFTLoss(nn.Module):
         return self.loss_fn(predicted_fft, target_fft)
 
 class CharbonnierLoss(nn.Module):
-    def __init__(self, epsilon=1e-6):
+    def __init__(self, epsilon=1e-3):
         super().__init__()
         self.epsilon = epsilon
 

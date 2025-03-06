@@ -35,7 +35,8 @@ class ModelHelper:
     def get_parameter_count(self):
         return sum(p.numel() for p in self.model.parameters())
 
-    def save_model(self, path, name):
+    def save_model(self, directory, file_name):
+        path = os.path.join(directory, "ModelSaves")
         if not os.path.exists(path):
             os.makedirs(path)
         save = {
@@ -43,20 +44,21 @@ class ModelHelper:
             'ema_model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict()
         }
-        file_name = f'{name}.pth'
-        torch.save(save, os.path.join(path, file_name))
-        print(f"Saved model to: {os.path.join(path, file_name)}")
+        file_name = f'{file_name}.pth'
+        path = os.path.join(path, file_name)
+        torch.save(save, path)
+        print(f"Saved model to: {path}")
 
     def load_model(self, directory, file_name, load_optimizer=True):
-        file_path = os.path.join(directory, file_name)
-        save = torch.load(file_path)
+        path = os.path.join(directory, "ModelSaves", file_name)
+        save = torch.load(path)
         self.model.load_state_dict(save['model_state_dict'])
         self.ema_model.load_state_dict(save['ema_model_state_dict'])
         self.new_ema = False
         if load_optimizer:
             self.optimizer.load_state_dict(save['optimizer_state_dict'])
 
-        print(f"Loaded model from: {file_path}")
+        print(f"Loaded model from: {path}")
 
     def model_call(self, model, lr, use_checkpoint=True):
         if use_checkpoint:
@@ -106,23 +108,23 @@ class ModelHelper:
         psnr = []
         self.model.eval()
         with torch.no_grad():
-            pbar = tqdm(test_loader, desc=f"Validating - Epoch {e + 1}/{epochs}", leave=True, dynamic_ncols=True)
+            pbar = tqdm(test_loader, disable=(self.rank != 0), desc=f"Validating - Epoch {e + 1}/{epochs}", leave=True, dynamic_ncols=True)
             for i, (hr, lr) in enumerate(pbar):
                 loss, hr_p = self.predict(hr, lr, use_ema_model=e + 1 > ema_start_epoch or not self.new_ema)
                 epoch_validation_losses.append(loss.item())
-                ssim.append(calculate_ssim(hr_p.float(), hr.float()).item())
-                psnr.append(calculate_psnr(hr_p.float(), hr.float()).mean().item())
+                ssim.append(calculate_ssim(hr_p.float(), hr.to(self.device).float()).item())
+                psnr.append(calculate_psnr(hr_p.float(), hr.to(self.device).float()).mean().item())
 
         return epoch_validation_losses, ssim, psnr
 
-    def training_loop(self, train_itr, scheduler, itrs_per_epoch, e, total_epochs, accumulation_steps, ema_loss_decay, ema_start_epoch):
+    def training_loop(self, train_itr, scheduler, itrs_per_epoch, e, total_epochs, accumulation_steps, ema_loss, ema_loss_decay, ema_start_epoch):
         epoch_training_losses = []
         loss_accumulator = 0
         self.model.train()
         pbar = tqdm(range(itrs_per_epoch), disable=(self.rank != 0), desc=f"Training - Epoch {e + 1}/{total_epochs}", leave=True, dynamic_ncols=True)
-        for i in pbar:
+        for _ in pbar:
             # gradient accumulation
-            for a in range(accumulation_steps):
+            for _ in range(accumulation_steps):
                 hr, lr = next(train_itr)
                 loss, _ = self.predict(hr, lr)
                 loss /= accumulation_steps
@@ -142,24 +144,24 @@ class ModelHelper:
                 ema_loss = ema_loss_decay * ema_loss + (1 - ema_loss_decay) * loss_accumulator
 
             pbar.set_postfix({
-                "Batch Loss": f"{loss_accumulator:.4f}",
-                "Epoch Avg Loss": f"{np.mean(epoch_training_losses):.4f}",
-                "EMA Batch Loss": f"{ema_loss:.4f}",
+                "Batch Loss": f"{loss_accumulator:.5f}",
+                "Epoch Avg Loss": f"{np.mean(epoch_training_losses):.5f}",
+                "EMA Batch Loss": f"{ema_loss:.5f}",
                 "Learning_Rate": self.optimizer.param_groups[0]['lr']
             })
             loss_accumulator = 0
 
-        return epoch_training_losses
+        return epoch_training_losses, ema_loss
 
-    def train_model(self, train_loader, test_loader, config, train_dataset=None, test_dataset=None, rank=0):
+    def train_model(self, train_loader, test_loader, config, train_dataset=None, test_dataset=None):
         iterations = config["training"]["iterations"]
         total_epochs = config["training"]["epochs"]
         accumulation_steps = config["training"]["accumulation_steps"]
         ema_start_epoch = config["training"]["ema_start_epoch"]
         save_model_every_i_epoch = config["tools"]["save_model_every_i_epoch"]
-        save_path = config["tools"]["save_path"]
-        save_name = config["tools"]["save_name"]
-        log = config["tools"]["log"]
+        path = config["tools"]["logging_path"]
+        model_save_name = config["tools"]["model_save_name"]
+        log = config["tools"]["wandb_log"]
 
         self.ema_model.eval()
         self.optimizer.zero_grad(set_to_none=True)
@@ -179,20 +181,23 @@ class ModelHelper:
             if self.multi_gpu:
                 train_loader.sampler.set_epoch(e)
 
-            # Training
-            epoch_training_losses = self.training_loop(train_itr, scheduler, itrs_per_epoch, e, total_epochs, accumulation_steps, ema_loss_decay, ema_start_epoch)
+            # Training Loop
+            epoch_training_losses, ema_loss = self.training_loop(train_itr, scheduler, itrs_per_epoch, e, total_epochs, accumulation_steps, ema_loss, ema_loss_decay, ema_start_epoch)
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            time.sleep(2)
 
             if self.rank == 0:
 
-                # Validation
+                # Validation Loop
                 epoch_validation_losses, ssim, psnr = self.validation_loop(test_loader, e, total_epochs, ema_start_epoch)
 
                 torch.cuda.synchronize()
                 time.sleep(1)
 
                 # Saving Model
-                if save_path != "" and save_model_every_i_epoch != 0 and (e+1) % save_model_every_i_epoch == 0:
-                    self.save_model(save_path, f"model_save_{save_name}")
+                if path != "" and save_model_every_i_epoch != 0 and (e+1) % save_model_every_i_epoch == 0:
+                    self.save_model(path, f"model_save_{model_save_name}")
 
                 # Epoch logging
                 if log:
@@ -213,6 +218,7 @@ class ModelHelper:
                     wandb.log(log)
 
             torch.cuda.synchronize()
+            torch.cuda.empty_cache()
             print("###################################################################")
             time.sleep(2)
 

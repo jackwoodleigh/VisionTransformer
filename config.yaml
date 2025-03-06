@@ -12,25 +12,33 @@ training:
   epochs: 100
   batch_size: 32
   accumulation_steps: 2
-  model_ema: 0.9995
+  model_ema: 0.999
   ema_start_epoch: 2
   criterion:
-    CharbonnierLoss: 1
-    FFTLoss: 0.025
+    CharbonnierLoss: 1.0
+    FFTLoss: 0.05
 
 data:
+  data_path: "data"
+  training_data_name: "train"
+  testing_data_name: "test"
   data_subset: 0
-  training_dataset_enlarge_scale: 10
+  training_dataset_enlarge_scale: 50
   training_image_size: 256
-  validation_image_size: 1080
+  validation_image_size: 512
   transform_data: True
+  num_dataloader_workers: 12
 
 tools:
-  log: True
-  save_path: "Model Saves"
-  save_name: ""
-  load_model_save_name: ""
+  wandb_log: True
+  logging_path: "Logs"
   save_model_every_i_epoch: 1
-  load_optimizer: False
-  multi_gpu_enable: True
+  model_save_name: ""
+  load_model_save_name: ""
+  load_optimizer: True
+  multi_gpu_enable: False
+  use_lmdb: False
+  use_sub_images: False
+  sub_img_col: 4
+  sum_img_row: 2
 

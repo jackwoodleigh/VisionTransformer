@@ -1,6 +1,7 @@
-torch
-torchvision
-numpy
+gdown
 tqdm
 wandb
 torchmetrics
+opencv-python
+lmdb
+

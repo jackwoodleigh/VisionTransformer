@@ -20,6 +20,8 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
+# lower lr
+# more scaling by multiple 2x
 
 class PadImg:
     def __init__(self, size):
@@ -32,6 +34,9 @@ class PadImg:
         padding = (pad_w // 2, pad_h // 2, pad_w - (pad_w // 2), pad_h - (pad_h // 2))
         img = F.pad(img, padding, padding_mode='reflect')
         return img
+def random_rotate(image):
+    angle = random.choice([0, 90, 180, 270])
+    return F.rotate(image, angle)
 
 def rotate_if_wide(img):
     if img.height > img.width:
@@ -44,17 +49,18 @@ def load_dataset(config, rank=0):
 
     if config["data"]["transform_data"]:
         transform = transforms.Compose([
-            training_pad_transform,
+            PadImg(config["data"]["training_image_size"]),
             transforms.RandomCrop(config["data"]["training_image_size"]),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(degrees=[-90, 90]),
+            random_rotate,
             transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
         ])
     else:
         transform = transforms.Compose([
-            training_pad_transform,
+            PadImg(config["data"]["training_image_size"]),
+            #transforms.Resize(config["data"]["training_image_size"]),
             transforms.RandomCrop(config["data"]["training_image_size"]),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
@@ -64,12 +70,46 @@ def load_dataset(config, rank=0):
         sub = config["data"]["data_subset"]
         if rank == 0:
             print(f"Using a subset of {sub} images.")
-        train_dataset = SuperResolutionDataset(root='./data/train', scale_values=config["model"]["scale_factor"], transform=transform, enlarge_factor=config["data"]["training_dataset_enlarge_scale"], subset=config["data"]["data_subset"])
 
-    else:
-        train_dataset = SuperResolutionDataset(root='./data/train', scale_values=config["model"]["scale_factor"], transform=transform, enlarge_factor=config["data"]["training_dataset_enlarge_scale"])
+    path = os.path.join(config["data"]["data_path"], config["data"]["training_data_name"])
 
-    test_dataset = SuperResolutionDataset(root='./data/test', scale_values=config["model"]["scale_factor"], transform=transforms.Compose([validation_pad_transform, transforms.RandomCrop(config["data"]["validation_image_size"]), transforms.ToTensor(), transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])]))
+    # Validating sub-image set
+    if config["tools"]["use_sub_images"]:
+        if rank == 0:
+            if os.path.exists(path + "_sub"):
+                print("Using Sub-Images.")
+            else:
+                raise Exception("Sub-images directory not found. Run DatasetPreparation.py")
+        path += "_sub"
+
+    # Validating LMDB
+    if config["tools"]["use_lmdb"]:
+        if rank == 0:
+            if os.path.exists(path + "_lmdb"):
+                print(f"LMDB Enabled.")
+            else:
+                raise Exception("LMDB directory not found. Run DatasetPreparation.py")
+        path += "_lmdb"
+
+    torch.cuda.synchronize()
+    train_dataset = SuperResolutionDataset(
+        root=path,
+        scale_values=config["model"]["scale_factor"],
+        transform=transform,
+        use_lmdb=config["tools"]["use_lmdb"],
+        enlarge_factor=config["data"]["training_dataset_enlarge_scale"],
+        subset=config["data"]["data_subset"]
+    )
+
+    test_dataset = SuperResolutionDataset(
+        root=os.path.join(config["data"]["data_path"], config["data"]["testing_data_name"]),
+        scale_values=config["model"]["scale_factor"],
+        transform=transforms.Compose([
+            #PadImg(config["data"]["validation_image_size"]),
+            transforms.RandomCrop(config["data"]["validation_image_size"]),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])])
+    )
 
     return train_dataset, test_dataset
 
@@ -79,11 +119,13 @@ def initialize(config, rank=0, world_size=0):
     #torch.backends.cudnn.benchmark = True
     #torch.backends.cudnn.deterministic = False
 
+    # Multi-GPU setup
     multi_gpu = False
-    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-        if rank == 0:
-            print("Total GPUs in usage: ", torch.cuda.device_count())
+    if rank == 0 and config["tools"]["multi_gpu_enable"]:
+        print("Multi-GPU Support Enabled.")
+        print("Total GPUs in usage: ", torch.cuda.device_count())
 
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
         multi_gpu = True
         #os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
         #os.environ.setdefault("MASTER_PORT", "29500")
@@ -98,6 +140,7 @@ def initialize(config, rank=0, world_size=0):
         scale_factor=config["model"]["scale_factor"]
     )
 
+    # Multi-GPU model
     model = model.to(f"cuda:{rank}")
     if multi_gpu:
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
@@ -107,23 +150,28 @@ def initialize(config, rank=0, world_size=0):
 
     helper = ModelHelper(model, optimizer, criterion, ema_beta=config["training"]["model_ema"], multi_gpu=multi_gpu)
 
-    # Loading Save
-    if config["tools"]["load_model_save_name"] != "":
-        helper.load_model(config["tools"]["model_save_directory"], config["tools"]["load_model_save_name"], load_optimizer=config["tools"]["load_optimizer"])
-
     size = helper.get_parameter_count()
     if rank == 0:
         print(f"Model Size: {size}")
 
-    # Loading Data
-    train_dataset, test_dataset = load_dataset(config)
+    # Loading Model Save
+    if config["tools"]["load_model_save_name"] != "":
+        helper.load_model(
+            config["tools"]["logging_path"],
+            config["tools"]["load_model_save_name"],
+            load_optimizer=config["tools"]["load_optimizer"]
+        )
+
+    # Loading Dataset
+    train_dataset, test_dataset = load_dataset(config, rank)
 
     sampler = None
     if multi_gpu:
         sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
 
-    train_loader = DataLoader(train_dataset, batch_size=config["training"]["batch_size"], shuffle=(sampler is None), num_workers=12, pin_memory=True, sampler=sampler)
-    test_loader = DataLoader(test_dataset, batch_size=2, shuffle=True, num_workers=12, pin_memory=True)
+    # Loading Data Loader
+    train_loader = DataLoader(train_dataset, batch_size=config["training"]["batch_size"], shuffle=(sampler is None), num_workers=config["data"]["num_dataloader_workers"], pin_memory=True, sampler=sampler)
+    test_loader = DataLoader(test_dataset, batch_size=2, shuffle=True, num_workers=config["data"]["num_dataloader_workers"], pin_memory=True)
 
     return model, helper, (train_dataset, test_dataset, sampler, train_loader, test_loader)
 
@@ -146,10 +194,16 @@ def sample_images(config, count):
     print("Running Image Sampling...")
     helper.sample_model(random_sample=count, dataset=train_dataset, save_img=True)
 
-def test(config):
-    model, helper, (dataset, train_loader, test_loader) = initialize(config)
+def test(rank, config, world_size=0):
+    model, helper, (train_dataset, test_dataset, sampler, train_loader, test_loader) = initialize(config, rank, world_size)
+    #from LMDB import read_from_lmdb, get_keys
+
+    helper.sample_model(random_sample=6, dataset=train_dataset, save_img=True, save_compare=True)
+
+    #img = read_from_lmdb(path, )
+    print()
     #helper.sample_model(random_sample=3, dataset=dataset, save_img=True, save_compare=True, use_ema_model=False)
-    ssim = []
+    '''ssim = []
     psnr = []
     # Validation
     with torch.no_grad():
@@ -161,7 +215,7 @@ def test(config):
             ssim.append(calculate_ssim(hr_p.float(), hr.float()).item())
             psnr.append(calculate_psnr(hr_p.float(), hr.float()).mean().item())
     print(np.mean(ssim))
-    print(np.mean(psnr))
+    print(np.mean(psnr))'''
 
 
 if __name__ == '__main__':
@@ -169,7 +223,7 @@ if __name__ == '__main__':
         config = yaml.safe_load(file)
 
     # Start W&B run
-    if config["tools"]["log"]:
+    if config["tools"]["wandb_log"]:
         import wandb
         wandb.login()
         wandb.init(
@@ -177,7 +231,8 @@ if __name__ == '__main__':
             config=config
         )
         run_name = wandb.run.name
-        config["tools"]["run_name"] = run_name
+        config["tools"]["model_save_name"] = run_name
+
 
     # Training
     if config["tools"]["multi_gpu_enable"] and torch.cuda.device_count() > 1:
@@ -185,6 +240,8 @@ if __name__ == '__main__':
         mp.spawn(training, args=(config, world_size,), nprocs=world_size, join=True)
     else:
         training(config=config, rank=0, world_size=0)
+
+    #test(config=config, rank=0, world_size=0)
 
     #training(config)
 
