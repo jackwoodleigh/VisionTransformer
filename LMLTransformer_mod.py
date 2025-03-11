@@ -28,6 +28,7 @@ class MLP(nn.Module):
         x = self.mlp(x)
         return x
 
+
 class LayerNorm(nn.Module):
     def __init__(self, normalized_shape, eps=1e-6, data_format="channels_first"):
         super().__init__()
@@ -37,7 +38,7 @@ class LayerNorm(nn.Module):
         self.data_format = data_format
         if self.data_format not in ["channels_last", "channels_first"]:
             raise NotImplementedError
-        self.normalized_shape = (normalized_shape, )
+        self.normalized_shape = (normalized_shape,)
 
     def forward(self, x):
         if self.data_format == "channels_last":
@@ -67,109 +68,102 @@ class CCM(nn.Module):
         return x
 
 
-class ViTBlock(nn.Module):
-    def __init__(self, window_size, dim):
+class SelfAttention(nn.Module):
+    def __init__(self, window_size, dim, num_heads=4):
         super().__init__()
         self.window_size = window_size
         self.dim = dim
+        self.num_heads = num_heads
 
         self.qkv = nn.Linear(dim, 3 * dim)
         self.pe_encoder = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim)
         self.out_proj = nn.Linear(dim, dim)
 
-    # output: B, H, W, C
-    # input: N, window_size^2, C
-    def window_partition(self, x):
-        B, H, W, C = x.shape
-        x = x.view(B, H // self.window_size, self.window_size, W // self.window_size, self.window_size, C)
-        return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, self.window_size, self.window_size, C).view(-1, self.window_size * self.window_size, C)
-
-    # input: N, window_size^2, C
-    # output: B, H, W, C
-    def reverse_window_partition(self, x, c, h, w):
-        #b = int(x.shape[0] / (w * h / self.window_size / self.window_size))
-        x = x.view(-1, self.window_size, self.window_size, c)
-        x = x.view(-1, h // self.window_size, w // self.window_size, self.window_size, self.window_size, c)
-        return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, h, w, c)
-
     # input: -1, window_size^2, C
     def locally_enhanced_pe(self, x, func):
-        N, win_size_sq, C = x.shape
+        N, num_heads, W_s, head_dim = x.shape
+
+        # N, num_heads, W_s, head_dim -> N, Win_s, C
+        x = x.permute(0, 2, 1, 3).contiguous().view(N, W_s, -1)
 
         # converting into spatial form: N, window_size^2, C -> B, C, window_size, window_size
-        x = x.reshape(N, C, self.window_size, self.window_size)
+        x = x.permute(0, 2, 1).contiguous().view(N, -1, self.window_size, self.window_size)
 
         # find spatial encodings for each window
         lepe = func(x)
 
         # converting into back into image with: B, C, H, W -> N, W^2, C
-        lepe = lepe.view(N, self.window_size * self.window_size, C)
+        lepe = lepe.view(N, -1, self.window_size * self.window_size).permute(0, 2, 1).contiguous()
 
         return lepe
 
-    def get_lepe(self, x, func):
-        B, N, C = x.shape
-        H = W = int(np.sqrt(N))
-        x = x.transpose(-2, -1).contiguous().view(B, C, H, W)
-
-        H_sp, W_sp = self.window_size, self.window_size
-        x = x.view(B, C, H // H_sp, H_sp, W // W_sp, W_sp)
-        x = x.permute(0, 2, 4, 1, 3, 5).contiguous().reshape(-1, C, H_sp, W_sp)  ### B', C, H', W'
-
-        lepe = func(x)  ### B', C, H', W'
-        lepe = lepe.reshape(-1, C, H_sp * W_sp).permute(0, 2, 1).contiguous()
-
-        x = x.reshape(-1, C, H_sp * W_sp).permute(0, 2, 1).contiguous()
-        return x, lepe
-
     # 1, 3, 16, 16 = x
     def forward(self, x):
-        B, H, W, C = x.shape
+        N, W_s, C = x.shape
 
-        # convert to windows
-        # B, H, W, C -> N, window_size^2, C
-        x = self.window_partition(x)
-
-        # q,k,v: N, window_size^2, C
-        qkv = self.qkv(x)
-        q, k, v = qkv.chunk(3, dim=-1)
+        # q,k,v: N, window_size^2, C -> N, num_heads, W_s, head_dim
+        qkv = self.qkv(x).reshape(N, W_s, 3*self.num_heads, C // self.num_heads).permute(0, 2, 1, 3).contiguous()
+        q, k, v = qkv.chunk(3, dim=1)
 
         # attention and apply positional encoding
-        v, lepe = self.get_lepe(v, self.pe_encoder)
+        lepe = self.locally_enhanced_pe(v, self.pe_encoder)
         x = nn.functional.scaled_dot_product_attention(q, k, v)
+
+        # N, num_heads, W_s, head_dim -> N, Win_s, C
+        x = x.permute(0, 2, 1, 3).contiguous().view(N, W_s, C)
         x += lepe
 
         x = self.out_proj(x)
-        x = self.reverse_window_partition(x, C, H, W)
         return x
 
-class LMLTBlock(nn.Module):
+
+class ViTBlock(nn.Module):
     def __init__(self, window_size, dim, ffn_scale=1.0):
         super().__init__()
-        self.LHSA = ViTBlock(dim=dim, window_size=window_size)
+        self.sa = SelfAttention(dim=dim, window_size=window_size)
         self.mlp = MLP(dim, int(dim * ffn_scale))
         self.ln1 = nn.LayerNorm(dim)
         self.ln2 = nn.LayerNorm(dim)
 
+    def window_partition(self, x):
+        B, C, H, W = x.shape
+        x = x.permute(0, 2, 3, 1).contigious()
+        x = x.view(B, H // self.window_size, self.window_size, W // self.window_size, self.window_size, C)
+        x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, self.window_size, self.window_size, C)
+        return x.view(-1, self.window_size * self.window_size, C)
+
+    def reverse_window_partition(self, x, h, w):
+        _, _, c = x.shape
+        # b = int(x.shape[0] / (w * h / self.window_size / self.window_size))
+        x = x.view(-1, self.window_size, self.window_size, c)
+        x = x.view(-1, h // self.window_size, w // self.window_size, self.window_size, self.window_size, c)
+        x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, h, w, c)
+        return x.permute(0, 3, 1, 2).contigious()
+
     # Input/Output B,C,H,W
     def forward(self, x):
-        # B,C,H,W ->  B,H,W,C
-        x = x.permute(0, 2, 3, 1)
-        x = self.LHSA(self.ln1(x)) + x
+        B, C, H, W = x.shape
+
+        # B, C, H, W -> N, window_size^2, C
+        x = self.window_partition(x)
+
+        x = self.sa(self.ln1(x)) + x
         x = self.mlp(self.ln2(x)) + x
-        return x.permute(0, 3, 1, 2)
+
+        # N, window_size^2, C -> B, C, H, W
+        x = self.reverse_window_partition(x, H, W)
+        return x
 
 
-class LHSABlock_2(nn.Module):
+class LHSABlock(nn.Module):
     def __init__(self, levels, window_size, dim):
         super().__init__()
         self.levels = levels
         self.dim = dim
 
-        self.vit = nn.ModuleList([*[LMLTBlock(window_size, dim) for _ in range(levels + 1)]])
-        self.fuse = nn.Conv2d(dim*levels, dim, 1, 1, 0)
+        self.vit = nn.ModuleList([*[ViTBlock(window_size, dim) for _ in range(levels + 1)]])
+        self.fuse = nn.Conv2d(dim * levels, dim, 1, 1, 0)
         self.aggr = nn.Conv2d(dim, dim, 1, 1, 0)
-        #self.aggr = nn.Conv2d(dim, dim, 1, 1, 0)
 
         self.activation = nn.GELU()
 
@@ -200,26 +194,24 @@ class LHSABlock_2(nn.Module):
             z = self.vit[i](z + self.re_zero[i] * z_prior)
 
             if i > 0:
-                z_prior = self.upsample[self.levels-i-1](z)
+                z_prior = self.upsample[self.levels - i - 1](z)
                 maps.append(F.interpolate(z_prior, size=(H, W), mode='bicubic'))
 
         maps.append(z)
 
         # feature fusion
-        #z = self.aggr(z)
         z = self.fuse(torch.cat(maps, dim=1)) + x
-        # multiplicative residual connection for less dependency on original.
-        #z = self.activation(z) * x
         z = self.aggr(z) + z
         return z
+
 
 class DenseResidualBlock(nn.Module):
     def __init__(self, n_sub_blocks, levels, window_size, dim, ffn_scale=2.0):
         super().__init__()
         self.n_sub_blocks = n_sub_blocks
-        self.layers = nn.Sequential(*[LMLTBlock(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale) for _ in range(n_sub_blocks)])
+        self.layers = nn.Sequential(*[LHSABlock(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale) for _ in range(n_sub_blocks)])
         self.out_layer = nn.Sequential(
-            LMLTBlock(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale),
+            LHSABlock(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale),
             nn.Conv2d(dim, dim, 3, 1, 1)
         )
         self.re_zero = nn.ParameterList([nn.Parameter(torch.tensor(0.0)) for _ in range(self.n_sub_blocks)])
@@ -234,6 +226,7 @@ class DenseResidualBlock(nn.Module):
 
         return self.out_layer(x) + residuals[0]
 
+
 class LMLTransformer(nn.Module):
     def __init__(self, n_blocks, levels, window_size, dim, features, scale_factor, ffn_scale=2.0):
         super().__init__()
@@ -247,7 +240,7 @@ class LMLTransformer(nn.Module):
         self.feature_extractor = nn.Conv2d(3, dim, 3, 1, 1)
 
         #self.layers = nn.Sequential(*[Blocks(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale) for _ in range(n_blocks)])
-        self.layers = nn.Sequential(*[LHSABlock_2(levels=levels, dim=dim, window_size=window_size) for _ in range(n_blocks)])
+        self.layers = nn.Sequential(*[LHSABlock(levels=levels, dim=dim, window_size=window_size) for _ in range(n_blocks)])
         #self.layers = nn.Sequential(*[DenseResidualBlock(n_sub_blocks=3, levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale) for _ in range(2)])
 
         img_reconstruction = [
@@ -268,11 +261,6 @@ class LMLTransformer(nn.Module):
         ])
 
         self.img_reconstruction = nn.Sequential(*img_reconstruction)
-
-        '''self.img_reconstruction = nn.Sequential(
-            nn.Conv2d(dim, 3 * scale_factor**2, 3, 1, 1),
-            nn.PixelShuffle(scale_factor),
-        )'''
 
         self.apply(self.init_weights)
 
