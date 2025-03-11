@@ -43,14 +43,16 @@ class FFTLoss(nn.Module):
         return self.loss_fn(predicted_fft, target_fft)
 
 class CharbonnierLoss(nn.Module):
-    def __init__(self, epsilon=1e-3):
+    def __init__(self, epsilon=1e-6):
         super().__init__()
         self.epsilon = epsilon
 
     def forward(self, prediction, target):
-        diff = prediction - target
-        loss = torch.sqrt(diff * diff + self.epsilon * self.epsilon)
-        return torch.mean(loss)
+        diff = torch.add(prediction, -target)
+        diff_sq = diff * diff
+        diff_sq_color = torch.mean(diff_sq, 1, True)
+        error = torch.sqrt(diff_sq_color + self.epsilon)
+        return torch.mean(error)
 
 class Criterion(nn.Module):
     def __init__(self, losses):

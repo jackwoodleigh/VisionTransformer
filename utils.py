@@ -104,7 +104,7 @@ def denormalize_image(img, mean, std):
     img_denorm = torch.clamp(img_denorm, 0.0, 1.0)
     return img_denorm
 
-def save_images_comparison(hr_p, hr, filename="comparison.png", denorm=True):
+def save_images_comparison(hr_p, hr, filename="comparison.png", denorm=False):
     if denorm:
         hr_p = denormalize_image(hr_p, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
         hr = denormalize_image(hr, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
@@ -112,23 +112,32 @@ def save_images_comparison(hr_p, hr, filename="comparison.png", denorm=True):
     vutils.save_image(comparison, filename, nrow=hr.shape[0])
     print("Saved Image Comparison.")
 
-def save_images_comparison2(hr_p, hr, filename="comparison.png", denorm=True):
+def save_images_comparison2(hr_p, hr, filename="comparison.png", denorm=False, compare_bicubic=True):
     if denorm:
         hr_p = denormalize_image(hr_p, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
         hr = denormalize_image(hr, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
-    comparison = torch.cat((hr, hr_p), dim=-1)
-    torchvision.utils.save_image(comparison, 'grid_image_direct.png', nrow=1, padding=2, normalize=True)
+    imgs = [hr]
+    if compare_bicubic:
+        lr = F.interpolate(hr, scale_factor=(1 / 4), mode='bicubic')
+        hr_bicubic = F.interpolate(lr, scale_factor=4, mode='bicubic')
+        imgs.append(hr_bicubic)
+
+    imgs.append(hr_p)
+
+    comparison = torch.cat(imgs, dim=-1)
+    torchvision.utils.save_image(comparison, filename, nrow=1, padding=2, normalize=True)
     print("Saved Image Comparison.")
 
 
-def save_images(tensor, filename="images.png", denorm=True):
+def save_images(tensor, filename="images.png", denorm=False):
     if denorm:
         tensor = denormalize_image(tensor, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
     vutils.save_image(tensor, filename, nrow=tensor.shape[0])
     print("Saved Images.")
 
-def tensor_to_pil(tensor):
-    tensor = denormalize_image(tensor, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
+def tensor_to_pil(tensor, denorm=False):
+    if denorm:
+        tensor = denormalize_image(tensor, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
     to_pil = transforms.ToPILImage()
     return [to_pil(t) for t in tensor]
 
@@ -142,7 +151,7 @@ def create_image_grid(images, grid_size):
         grid_img.paste(img, (x, y))
     return grid_img
 
-def calculate_psnr(hr_p, hr, max_pixel_value=1.0, denorm=True):
+def calculate_psnr(hr_p, hr, max_pixel_value=1.0, denorm=False):
     if denorm:
         hr_p = denormalize_image(hr_p, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
         hr = denormalize_image(hr, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
@@ -157,7 +166,6 @@ def calculate_ssim(hr_p, hr, denorm=False):
     if denorm:
         hr_p = denormalize_image(hr_p, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
         hr = denormalize_image(hr, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
-
     ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(hr_p.device)
     return ssim(hr_p, hr)
 

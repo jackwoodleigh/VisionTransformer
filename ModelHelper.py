@@ -66,36 +66,41 @@ class ModelHelper:
         else:
             return model(lr)
 
-    def sample_model(self, lr=None, hr=None,  random_sample=0, dataset=None, save_img=False, save_compare=False, use_ema_model=True):
-        if random_sample != 0 and dataset is not None:
-            r = random.randint(0, len(dataset)-random_sample)
-            stack = [dataset[i] for i in range(r, r + random_sample)]
-            hr_list, lr_list = zip(*stack)
-            lr = torch.stack(lr_list).to(self.device)
-            hr = torch.stack(hr_list).to(self.device)
+    def sample_model(self, random_sample, dataset, save_img=False, save_compare=False, use_ema_model=True):
+        r = random.randint(0, len(dataset)-random_sample)
+        stack = [dataset[i] for i in range(r, r + random_sample)]
+        hr_list, lr_list = zip(*stack)
+        lr = torch.stack(lr_list).to(self.device)
+        hr = torch.stack(hr_list).to(self.device)
 
-        if lr is not None:
-            with torch.no_grad():
-                if use_ema_model:
-                    self.ema_model.eval()
-                    hr_p = self.ema_model(lr.to(self.device))
-                else:
-                    self.model.eval()
-                    hr_p = self.model(lr.to(self.device))
-
-            if save_img:
-                if save_compare:
-                    save_images_comparison2(hr, hr_p)
-                else:
-                    save_images(hr_p)
+        with torch.no_grad():
+            if use_ema_model:
+                self.ema_model.eval()
+                model = self.ema_model
             else:
-                return hr_p, hr if hr is not None else None
+                self.model.eval()
+                model = self.model
+
+            hr_p = []
+            for i in range(random_sample):
+                hr_p.append(self.model_call(model, lr[i].unsqueeze(0)).squeeze(0))
+            hr_p = torch.stack(hr_p, dim=0)
+
+        if save_img:
+            if save_compare:
+                save_images_comparison2(hr_p, hr)
+            else:
+                save_images(hr_p)
+        else:
+            return hr_p, hr if hr is not None else None
 
     def predict(self, hr, lr, use_ema_model=False):
         with autocast(device_type="cuda"):
+
             if use_ema_model:
                 hr_p = self.model_call(self.ema_model, lr.to(self.device))
             else:
+
                 hr_p = self.model_call(self.model, lr.to(self.device))
 
             loss = self.criterion(hr_p.to(self.device), hr.to(self.device))
@@ -130,6 +135,9 @@ class ModelHelper:
                 loss /= accumulation_steps
                 loss_accumulator += loss.item()
                 self.scaler.scale(loss).backward()
+
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -174,26 +182,35 @@ class ModelHelper:
         self.ema.start_step = len(train_loader) * ema_start_epoch // accumulation_steps
 
         train_itr = infinite_dataloader(train_loader)
+        print(self.rank)
 
+        if self.multi_gpu:
+            torch.distributed.barrier()
         torch.cuda.synchronize()
         time.sleep(2)
+
         for e in range(total_epochs):
             if self.multi_gpu:
                 train_loader.sampler.set_epoch(e)
 
             # Training Loop
             epoch_training_losses, ema_loss = self.training_loop(train_itr, scheduler, itrs_per_epoch, e, total_epochs, accumulation_steps, ema_loss, ema_loss_decay, ema_start_epoch)
+
+            torch.cuda.synchronize()
+            if self.multi_gpu:
+                torch.distributed.barrier()
+            time.sleep(2)
+
+            # Validation Loop
+            epoch_validation_losses, ssim, psnr = self.validation_loop(test_loader, e, total_epochs, ema_start_epoch)
+
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
+            if self.multi_gpu:
+                torch.distributed.barrier()
             time.sleep(2)
 
             if self.rank == 0:
-
-                # Validation Loop
-                epoch_validation_losses, ssim, psnr = self.validation_loop(test_loader, e, total_epochs, ema_start_epoch)
-
-                torch.cuda.synchronize()
-                time.sleep(1)
 
                 # Saving Model
                 if path != "" and save_model_every_i_epoch != 0 and (e+1) % save_model_every_i_epoch == 0:
@@ -217,8 +234,11 @@ class ModelHelper:
 
                     wandb.log(log)
 
+            if self.multi_gpu:
+                torch.distributed.barrier()
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
-            print("###################################################################")
+            if self.rank == 0:
+                print("###################################################################")
             time.sleep(2)
 

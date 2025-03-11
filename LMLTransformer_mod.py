@@ -13,9 +13,20 @@ from torch.utils.checkpoint import checkpoint
 # https://arxiv.org/pdf/2404.00722v5
 # https://arxiv.org/pdf/2205.04437v3 maybe try out lam
 
-class FConv(nn.Module):
-    def __init__(self):
-        super.__init__()
+class MLP(nn.Module):
+    def __init__(self, in_features, hidden_features=None, out_features=None):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.mlp = nn.Sequential(
+            nn.Linear(in_features, hidden_features),
+            nn.GELU(),
+            nn.Linear(hidden_features, out_features)
+        )
+
+    def forward(self, x):
+        x = self.mlp(x)
+        return x
 
 class LayerNorm(nn.Module):
     def __init__(self, normalized_shape, eps=1e-6, data_format="channels_first"):
@@ -113,9 +124,7 @@ class ViTBlock(nn.Module):
 
     # 1, 3, 16, 16 = x
     def forward(self, x):
-
-        B, C, H, W = x.shape
-        x = x.permute(0, 2, 3, 1)
+        B, H, W, C = x.shape
 
         # convert to windows
         # B, H, W, C -> N, window_size^2, C
@@ -132,87 +141,24 @@ class ViTBlock(nn.Module):
 
         x = self.out_proj(x)
         x = self.reverse_window_partition(x, C, H, W)
+        return x
 
+class LMLTBlock(nn.Module):
+    def __init__(self, window_size, dim, ffn_scale=1.0):
+        super().__init__()
+        self.LHSA = ViTBlock(dim=dim, window_size=window_size)
+        self.mlp = MLP(dim, int(dim * ffn_scale))
+        self.ln1 = nn.LayerNorm(dim)
+        self.ln2 = nn.LayerNorm(dim)
+
+    # Input/Output B,C,H,W
+    def forward(self, x):
+        # B,C,H,W ->  B,H,W,C
+        x = x.permute(0, 2, 3, 1)
+        x = self.LHSA(self.ln1(x)) + x
+        x = self.mlp(self.ln2(x)) + x
         return x.permute(0, 3, 1, 2)
 
-
-class LHSABlock(nn.Module):
-    def __init__(self, levels, window_size, dim):
-        super().__init__()
-        self.levels = levels
-        self.dim = dim
-
-        self.vit = nn.ModuleList([*[ViTBlock(window_size, dim // levels) for _ in range(levels)]])
-        self.aggr = nn.Conv2d(dim, dim, 1, 1, 0)
-
-        self.activation = nn.GELU()
-
-        self.upsample_1st = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(dim // levels, (dim // levels) * (2 ** 2), kernel_size=3, stride=1, padding=1),
-                nn.PixelShuffle(2),
-                nn.GELU(),
-                nn.Conv2d(dim // levels, (dim // levels), 3, 1, 1)
-
-            ) for _ in range(levels)])
-
-        self.re_zero = nn.ParameterList([nn.Parameter(torch.tensor(0.0)) for _ in range(self.levels)])
-
-        '''self.upsample_2nd = nn.ModuleList([])
-        for i in range(levels)[1:-1]:
-            scale = 2**i
-            self.upsample_2nd.append(nn.Sequential(
-                nn.Conv2d(dim // levels, (dim // levels) * (scale ** 2), kernel_size=3, stride=1, padding=1),
-                nn.PixelShuffle(scale)
-            ))'''
-
-    def forward(self, x):
-        B, C, H, W = x.size()
-
-        # we chunk the features into levels
-        x_chunked = x.chunk(self.levels, dim=1)
-
-        # we are getting the hierarchical layers by via down sampling
-        downsampled_maps = []
-        for i in range(self.levels):
-            if i > 0:
-                # new size
-                size = (H // 2 ** i, W // 2 ** i)
-
-                # down samples to new size
-                #z_down = F.adaptive_max_pool2d(x_chunked[i], size)
-                z_down = F.interpolate(x_chunked[i], size=size, mode='bicubic')
-                downsampled_maps.append(z_down)
-
-            else:
-                downsampled_maps.append(x_chunked[i])
-
-        out_maps = []
-        for i in reversed(range(self.levels)):
-            z = self.vit[i](downsampled_maps[i])
-            if i > 0:
-                # interpolating it the size of the layer above
-                #z = F.interpolate(z, size=(z.shape[2] * 2, z.shape[3] * 2), mode='nearest')
-                #z = self.pixel_shuffle(self.upsample_1st[self.levels-1-i](z))
-                z = self.upsample_1st[self.levels-1-i](z)
-
-                # adding elementwise the up-sampled feature map for increased detail
-                downsampled_maps[i - 1] = downsampled_maps[i - 1] + self.re_zero[i] * z
-
-                # interpolating image back to original H*W feature map size and returning
-                z = F.interpolate(z, size=(H, W), mode='bicubic')
-                '''if i > 1:
-                    z = self.upsample_2nd[i-2](z)'''
-
-            out_maps.append(z)
-
-        # aggregate feature maps
-        out_maps = self.aggr(torch.cat(out_maps, dim=1))
-
-        # multiplicative residual connection for less dependency on original.
-        out_maps = self.activation(out_maps) * x
-
-        return out_maps
 
 class LHSABlock_2(nn.Module):
     def __init__(self, levels, window_size, dim):
@@ -220,8 +166,9 @@ class LHSABlock_2(nn.Module):
         self.levels = levels
         self.dim = dim
 
-        self.vit = nn.ModuleList([*[ViTBlock(window_size, dim) for _ in range(levels)]])
+        self.vit = nn.ModuleList([*[LMLTBlock(window_size, dim) for _ in range(levels + 1)]])
         self.fuse = nn.Conv2d(dim*levels, dim, 1, 1, 0)
+        self.aggr = nn.Conv2d(dim, dim, 1, 1, 0)
         #self.aggr = nn.Conv2d(dim, dim, 1, 1, 0)
 
         self.activation = nn.GELU()
@@ -260,125 +207,11 @@ class LHSABlock_2(nn.Module):
 
         # feature fusion
         #z = self.aggr(z)
-        z = self.fuse(torch.cat(maps, dim=1))
-
-        # multiplicative residual connection for less dependency on original.
-        z = self.activation(z) * x
-
-        return z
-
-class LHSABlock_3(nn.Module):
-    def __init__(self, levels, window_size, dim):
-        super().__init__()
-        self.levels = levels
-        self.dim = dim
-
-        self.vit = nn.ModuleList([*[ViTBlock(window_size, dim) for _ in range(levels)]])
-        self.fuse = nn.Conv2d(dim*levels, dim, 1, 1, 0)
-
-        self.activation = nn.GELU()
-
-        self.level_upsample = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(dim, dim * (2 ** 2), kernel_size=3, stride=1, padding=1),
-                nn.PixelShuffle(2),
-                nn.GELU(),
-                nn.Conv2d(dim, dim, 3, 1, 1)
-
-            ) for _ in range(levels)])
-
-        self.re_zero_weights = nn.ParameterList([nn.Parameter(torch.tensor(0.0)) for _ in range(self.levels)])
-
-    def forward(self, x):
-        B, C, H, W = x.size()
-
-        z_prior = 0
-        maps = []
-        for i in reversed(range(self.levels)):
-            if i > 0:
-                size = (H // 2 ** i, W // 2 ** i)
-                z = F.interpolate(x, size=size, mode='bicubic')
-            else:
-                z = x
-
-            z = self.vit[i](z + self.re_zero_weights[i] * z_prior)
-
-            if i > 0:
-                z_prior = self.level_upsample[self.levels-i-1](z)
-                maps = [self.level_upsample[self.levels-i-1](m) for m in maps]
-                maps.append(z_prior)
-
-        maps.append(z)
         z = self.fuse(torch.cat(maps, dim=1)) + x
-
-        return z
-class LHSABlock_4(nn.Module):
-    def __init__(self, levels, window_size, dim):
-        super().__init__()
-        self.levels = levels
-        self.dim = dim
-
-        self.vit = nn.ModuleList([*[ViTBlock(window_size, dim // levels) for _ in range(levels)]])
-        self.fuse = nn.Conv2d(dim, dim, 1, 1, 0)
-        #self.aggr = nn.Conv2d(dim, dim, 1, 1, 0)
-
-        self.activation = nn.GELU()
-
-        self.upsample = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(dim // levels, (dim // levels) * (2 ** 2), kernel_size=3, stride=1, padding=1),
-                nn.PixelShuffle(2),
-                nn.GELU(),
-                nn.Conv2d(dim // levels, dim // levels, 3, 1, 1)
-
-            ) for _ in range(levels)])
-
-        self.re_zero = nn.ParameterList([nn.Parameter(torch.tensor(0.0)) for _ in range(self.levels)])
-
-    def forward(self, x):
-        B, C, H, W = x.size()
-        x_chunked = x.chunk(self.levels, dim=1)
-        z_prior = 0
-        maps = []
-        for i in reversed(range(self.levels)):
-            # downsample to level size
-            if i > 0:
-                size = (H // 2 ** i, W // 2 ** i)
-                z = F.interpolate(x_chunked[i], size=size, mode='bicubic')
-            else:
-                z = x_chunked[i]
-
-            z = self.vit[i](z + self.re_zero[i] * z_prior)
-
-            if i > 0:
-                z_prior = self.upsample[self.levels-i-1](z)
-                maps.append(F.interpolate(z_prior, size=(H, W), mode='bicubic'))
-
-        maps.append(z)
-
-        # feature fusion
-        #z = self.aggr(z)
-        z = self.fuse(torch.cat(maps, dim=1))
-
         # multiplicative residual connection for less dependency on original.
         #z = self.activation(z) * x
-        z = self.activation(z) + x
-
+        z = self.aggr(z) + z
         return z
-
-
-class LMLTBlock(nn.Module):
-    def __init__(self, levels, window_size, dim, ffn_scale=2.0):
-        super().__init__()
-        self.LHSA = LHSABlock_2(levels=levels, dim=dim, window_size=window_size)
-        self.CCM = CCM(dim, ffn_scale)
-        self.ln1 = LayerNorm(dim)
-        self.ln2 = LayerNorm(dim)
-
-    def forward(self, x):
-        x = self.LHSA(self.ln1(x)) + x
-        x = self.CCM(self.ln2(x)) + x
-        return x
 
 class DenseResidualBlock(nn.Module):
     def __init__(self, n_sub_blocks, levels, window_size, dim, ffn_scale=2.0):
@@ -413,7 +246,8 @@ class LMLTransformer(nn.Module):
 
         self.feature_extractor = nn.Conv2d(3, dim, 3, 1, 1)
 
-        self.layers = nn.Sequential(*[LMLTBlock(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale) for _ in range(n_blocks)])
+        #self.layers = nn.Sequential(*[Blocks(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale) for _ in range(n_blocks)])
+        self.layers = nn.Sequential(*[LHSABlock_2(levels=levels, dim=dim, window_size=window_size) for _ in range(n_blocks)])
         #self.layers = nn.Sequential(*[DenseResidualBlock(n_sub_blocks=3, levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale) for _ in range(2)])
 
         img_reconstruction = [
