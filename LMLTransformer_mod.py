@@ -120,6 +120,7 @@ class SelfAttention(nn.Module):
 class ViTBlock(nn.Module):
     def __init__(self, window_size, dim, ffn_scale=1.0):
         super().__init__()
+        self.window_size = window_size
         self.sa = SelfAttention(dim=dim, window_size=window_size)
         self.mlp = MLP(dim, int(dim * ffn_scale))
         self.ln1 = nn.LayerNorm(dim)
@@ -127,7 +128,7 @@ class ViTBlock(nn.Module):
 
     def window_partition(self, x):
         B, C, H, W = x.shape
-        x = x.permute(0, 2, 3, 1).contigious()
+        x = x.permute(0, 2, 3, 1).contiguous()
         x = x.view(B, H // self.window_size, self.window_size, W // self.window_size, self.window_size, C)
         x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, self.window_size, self.window_size, C)
         return x.view(-1, self.window_size * self.window_size, C)
@@ -138,7 +139,7 @@ class ViTBlock(nn.Module):
         x = x.view(-1, self.window_size, self.window_size, c)
         x = x.view(-1, h // self.window_size, w // self.window_size, self.window_size, self.window_size, c)
         x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, h, w, c)
-        return x.permute(0, 3, 1, 2).contigious()
+        return x.permute(0, 3, 1, 2).contiguous()
 
     # Input/Output B,C,H,W
     def forward(self, x):
@@ -162,7 +163,7 @@ class LHSABlock(nn.Module):
         self.dim = dim
 
         self.vit = nn.ModuleList([*[ViTBlock(window_size, dim) for _ in range(levels + 1)]])
-        self.fuse = nn.Conv2d(dim * levels, dim, 1, 1, 0)
+        #self.fuse = nn.Conv2d(dim * levels, dim, 1, 1, 0)
         self.aggr = nn.Conv2d(dim, dim, 1, 1, 0)
 
         self.activation = nn.GELU()
@@ -182,7 +183,7 @@ class LHSABlock(nn.Module):
         B, C, H, W = x.size()
 
         z_prior = 0
-        maps = []
+        #maps = []
         for i in reversed(range(self.levels)):
             # downsample to level size
             if i > 0:
@@ -195,12 +196,12 @@ class LHSABlock(nn.Module):
 
             if i > 0:
                 z_prior = self.upsample[self.levels - i - 1](z)
-                maps.append(F.interpolate(z_prior, size=(H, W), mode='bicubic'))
+                #maps.append(F.interpolate(z_prior, size=(H, W), mode='bicubic'))
 
-        maps.append(z)
+        #maps.append(z)
 
         # feature fusion
-        z = self.fuse(torch.cat(maps, dim=1)) + x
+        #z = self.fuse(torch.cat(maps, dim=1)) + x
         z = self.aggr(z) + z
         return z
 
