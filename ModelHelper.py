@@ -35,15 +35,19 @@ class ModelHelper:
     def get_parameter_count(self):
         return sum(p.numel() for p in self.model.parameters())
 
-    def save_model(self, directory, file_name):
+    def save_model(self, directory, file_name, config=None):
         path = os.path.join(directory, "ModelSaves")
         if not os.path.exists(path):
             os.makedirs(path)
+
         save = {
             'model_state_dict': self.model.state_dict(),
             'ema_model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict()
         }
+        if config is not None:
+            save["config"] = config
+
         file_name = f'{file_name}.pth'
         path = os.path.join(path, file_name)
         torch.save(save, path)
@@ -52,6 +56,7 @@ class ModelHelper:
     def load_model(self, directory, file_name, load_optimizer=True):
         path = os.path.join(directory, "ModelSaves", file_name)
         save = torch.load(path)
+
         self.model.load_state_dict(save['model_state_dict'])
         self.ema_model.load_state_dict(save['ema_model_state_dict'])
         self.new_ema = False
@@ -65,6 +70,14 @@ class ModelHelper:
             return checkpoint(model, lr, use_reentrant=False)
         else:
             return model(lr)
+
+    def update_params(self):
+        self.scaler.unscale_(self.optimizer)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.optimizer.zero_grad(set_to_none=True)
+        self.ema.step_ema(ema_model=self.ema_model, model=self.model, new_ema=self.new_ema)
 
     def sample_model(self, random_sample, dataset, save_img=False, save_compare=False, use_ema_model=True):
         r = random.randint(0, len(dataset)-random_sample)
@@ -96,7 +109,6 @@ class ModelHelper:
 
     def predict(self, hr, lr, use_ema_model=False):
         with autocast(device_type="cuda"):
-
             if use_ema_model:
                 hr_p = self.model_call(self.ema_model, lr.to(self.device))
             else:
@@ -112,6 +124,7 @@ class ModelHelper:
         ssim = []
         psnr = []
         self.model.eval()
+        self.ema_model.eval()
         with torch.no_grad():
             pbar = tqdm(test_loader, disable=(self.rank != 0), desc=f"Validating - Epoch {e + 1}/{epochs}", leave=True, dynamic_ncols=True)
             for i, (hr, lr) in enumerate(pbar):
@@ -125,9 +138,10 @@ class ModelHelper:
     def training_loop(self, train_itr, scheduler, itrs_per_epoch, e, total_epochs, accumulation_steps, ema_loss, ema_loss_decay, ema_start_epoch):
         epoch_training_losses = []
         loss_accumulator = 0
-        self.model.train()
         pbar = tqdm(range(itrs_per_epoch), disable=(self.rank != 0), desc=f"Training - Epoch {e + 1}/{total_epochs}", leave=True, dynamic_ncols=True)
         for _ in pbar:
+            self.model.train()
+
             # gradient accumulation
             for _ in range(accumulation_steps):
                 hr, lr = next(train_itr)
@@ -136,13 +150,7 @@ class ModelHelper:
                 loss_accumulator += loss.item()
                 self.scaler.scale(loss).backward()
 
-            self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self.optimizer.zero_grad(set_to_none=True)
-            self.ema.step_ema(ema_model=self.ema_model, model=self.model, new_ema=self.new_ema)
+            self.update_params()
             epoch_training_losses.append(loss_accumulator)
             scheduler.step()
 
@@ -214,7 +222,7 @@ class ModelHelper:
 
                 # Saving Model
                 if path != "" and save_model_every_i_epoch != 0 and (e+1) % save_model_every_i_epoch == 0:
-                    self.save_model(path, f"model_save_{model_save_name}")
+                    self.save_model(path, f"model_save_{model_save_name}", config)
 
                 # Epoch logging
                 if log:

@@ -138,8 +138,11 @@ def initialize(config, rank=0, world_size=0):
 
     from LMLTransformer_mod import LMLTransformer
     model = LMLTransformer(
+        block_type= config["model"]["block_type"],
         n_blocks=config["model"]["n_blocks"],
-        levels=config["model"]["levels"], window_size=config["model"]["n_blocks"],
+        n_sub_blocks=config["model"]["n_sub_blocks"],
+        levels=config["model"]["levels"],
+        window_size=config["model"]["window_size"],
         dim=config["model"]["dim"],
         features=config["model"]["features"],
         scale_factor=config["model"]["scale_factor"]
