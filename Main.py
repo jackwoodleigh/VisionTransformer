@@ -138,13 +138,15 @@ def initialize(config, rank=0, world_size=0):
 
     from LMLTransformer_mod import LMLTransformer
     model = LMLTransformer(
-        block_type= config["model"]["block_type"],
+        block_type=config["model"]["block_type"],
         n_blocks=config["model"]["n_blocks"],
         n_sub_blocks=config["model"]["n_sub_blocks"],
         levels=config["model"]["levels"],
         window_size=config["model"]["window_size"],
         dim=config["model"]["dim"],
-        features=config["model"]["features"],
+        n_heads=config["model"]["n_heads"],
+        n_heads_fuse=config["model"]["n_heads_fuse"],
+        feature_dim=config["model"]["feature_dim"],
         scale_factor=config["model"]["scale_factor"]
     )
 
@@ -195,7 +197,7 @@ def initialize(config, rank=0, world_size=0):
     # Loading Data Loader
     train_loader = DataLoader(train_dataset, batch_size=config["training"]["batch_size_per_gpu"], shuffle=(sampler is None), num_workers=config["data"]["num_dataloader_workers"], pin_memory=True, sampler=sampler)
 
-    test_loader = DataLoader(test_dataset, batch_size=config["training"]["batch_size_per_gpu"], shuffle=False, num_workers=config["data"]["num_dataloader_workers"], pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=config["data"]["num_dataloader_workers"], pin_memory=True)
 
     return model, helper, (train_dataset, test_dataset, sampler, train_loader, test_loader)
 

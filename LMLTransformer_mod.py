@@ -29,52 +29,12 @@ class MLP(nn.Module):
         return x
 
 
-class LayerNorm(nn.Module):
-    def __init__(self, normalized_shape, eps=1e-6, data_format="channels_first"):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(normalized_shape))
-        self.bias = nn.Parameter(torch.zeros(normalized_shape))
-        self.eps = eps
-        self.data_format = data_format
-        if self.data_format not in ["channels_last", "channels_first"]:
-            raise NotImplementedError
-        self.normalized_shape = (normalized_shape,)
-
-    def forward(self, x):
-        if self.data_format == "channels_last":
-            return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
-        elif self.data_format == "channels_first":
-            u = x.mean(1, keepdim=True)
-            s = (x - u).pow(2).mean(1, keepdim=True)
-            x = (x - u) / torch.sqrt(s + self.eps)
-            x = self.weight[:, None, None] * x + self.bias[:, None, None]
-            return x
-
-
-class CCM(nn.Module):
-    def __init__(self, dim, growth_rate=2.0):
-        super().__init__()
-        hidden_dim = int(dim * growth_rate)
-
-        self.ccm = nn.Sequential(
-            nn.Conv2d(dim, hidden_dim, 3, 1, 1),
-            nn.GELU(),
-            nn.Conv2d(hidden_dim, dim, 1, 1, 0)
-        )
-
-    # B, H, W, C - input and output
-    def forward(self, x):
-        x = self.ccm(x)
-        return x
-
-
-class MSA(nn.Module):
+class WindowedMSA(nn.Module):
     def __init__(self, window_size, dim, num_heads=4, attn_drop=0., proj_drop=0.):
         super().__init__()
         self.window_size = window_size
-        self.dim = dim
         self.num_heads = num_heads
-        assert dim % num_heads == 0
+        assert dim % num_heads == 0, f"dim ({dim}) must be divisible by num_heads ({num_heads})"
 
         self.qkv = nn.Linear(dim, 3 * dim)
         self.pe_encoder = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim)
@@ -102,7 +62,7 @@ class MSA(nn.Module):
         x = x.view(-1, H // H_sp, W // W_sp, H_sp, W_sp, C)
         return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, H, W, C).view(-1, H*W, C)
 
-    def get_lepe(self, x, H, W):
+    def locally_enhanced_PE(self, x, H, W):
         B, N, C = x.shape
         H_sp = W_sp = self.window_size
 
@@ -123,7 +83,7 @@ class MSA(nn.Module):
         # B, N, C -> B, n_heads, W_sp, C // n_heads
         q = self.window_partition(q, H, W)
         k = self.window_partition(k, H, W)
-        v, lepe = self.get_lepe(v, H, W)
+        v, lepe = self.locally_enhanced_PE(v, H, W)
 
         x = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop) + lepe
 
@@ -138,8 +98,7 @@ class MSA(nn.Module):
 class ViTBlock(nn.Module):
     def __init__(self, window_size, dim, n_heads=4, ffn_scale=2, drop_path=0.0):
         super().__init__()
-        self.window_size = window_size
-        self.msa = MSA(dim=dim, window_size=window_size, num_heads=n_heads)
+        self.msa = WindowedMSA(dim=dim, window_size=window_size, num_heads=n_heads)
         self.mlp = MLP(dim, ffn_scale=ffn_scale)
         self.ln1 = nn.LayerNorm(dim)
         self.ln2 = nn.LayerNorm(dim)
@@ -157,71 +116,26 @@ class ViTBlock(nn.Module):
 
         # B, N, C -> B, C, H, W
         x = x.permute(0, 2, 1).contiguous().view(B, C, H, W)
-
         return x
 
-class LHSABlock_4(nn.Module):
-    def __init__(self, levels, window_size, dim, ffn_scale=2, drop_path=0.0):
+class MSFBlock(nn.Module):
+    def __init__(self, levels, window_size, dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.0):
         super().__init__()
-        self.levels = levels
-        self.dim = dim
-
-        self.level_dims = [dim // (4**i) for i in reversed(range(1, levels))]
-        self.level_dims.append(dim)
-        temp_dim = sum(self.level_dims)
-
-        self.vit = nn.ModuleList([*[ViTBlock(window_size, dim, ffn_scale=ffn_scale, drop_path=drop_path) for _ in range(levels)]])
-
-        self.downsample = nn.ModuleList([*[nn.Conv2d(dim, dim // (4**i), 3, 1, 1) for i in reversed(range(1, levels))]])
-
-        self.merge = nn.ModuleList([nn.PixelUnshuffle(2**i) for i in reversed(range(levels))])
-        self.unmerge = nn.ModuleList([nn.PixelShuffle(2**i) for i in reversed(range(levels))])
-
-        self.aggr = nn.Conv2d(temp_dim, temp_dim, 1, 1, 0)
-
-        self.vit_fuse = ViTBlock(window_size, temp_dim, ffn_scale=ffn_scale, drop_path=drop_path)
-        self.fuse = nn.Conv2d(temp_dim, dim, 1, 1, 0)
-
-    def forward(self, x):
-        maps = []
-        for i in range(self.levels):
-            #z = x[:, :self.level_dims[i], :, :]
-            if i < self.levels-1:
-                z = self.downsample[i](x)
-            else:
-                z = x
-            z = self.merge[i](z)
-            z = self.vit[i](z)
-            z = self.unmerge[i](z)
-            maps.append(z)
-
-        z = self.aggr(torch.cat(maps, dim=1))
-        # feature fusion
-        z = self.vit_fuse(z)
-        z = self.fuse(z) + x
-        return z
-
-class LHSABlock_5(nn.Module):
-    def __init__(self, levels, window_size, dim, ffn_scale=2, drop_path=0.0):
-        super().__init__()
-        self.levels = levels
-        self.dim = dim
-
-        self.total_dim = sum([dim // (4**i) for i in range(levels)])
-
+        self.levels=levels
         self.level_layer = nn.ModuleList([
             nn.Sequential(
                 nn.Conv2d(dim, dim // (4 ** i), 3, 1, 1),
                 nn.PixelUnshuffle(2 ** i),
-                ViTBlock(window_size, dim, ffn_scale=ffn_scale, drop_path=drop_path),
+                ViTBlock(window_size, dim, n_heads=n_heads, ffn_scale=ffn_scale, drop_path=drop_path),
                 nn.Conv2d(dim, dim, 3, 1, 1),
                 nn.PixelShuffle(2 ** i)
             ) for i in range(1, levels)
         ])
 
+        total_dim = sum([dim // (4 ** i) for i in range(levels)])
         self.fuse = nn.Sequential(
-            ViTBlock(window_size, self.total_dim, n_heads=6, ffn_scale=ffn_scale, drop_path=drop_path),
-            nn.Conv2d(self.total_dim, dim, 1, 1),
+            ViTBlock(window_size, total_dim, n_heads=n_heads_fuse, ffn_scale=ffn_scale, drop_path=drop_path),
+            nn.Conv2d(total_dim, dim, 1, 1),
             nn.Conv2d(dim, dim, 3, 1, 1)
         )
 
@@ -229,77 +143,39 @@ class LHSABlock_5(nn.Module):
         maps = [x]
         for i in range(self.levels-1):
             maps.append(self.level_layer[i](x))
+        return self.fuse(torch.cat(maps, dim=1)) + x
 
-        z = self.fuse(torch.cat(maps, dim=1)) + x
-        return z
-
-class LHSABlock(nn.Module):
-    def __init__(self, levels, window_size, dim, ffn_scale=2, drop_path=0.0):
-        super().__init__()
-        self.levels = levels
-        self.dim = dim
-
-        self.vit = nn.ModuleList([*[ViTBlock(window_size, dim, ffn_scale=ffn_scale, drop_path=drop_path) for _ in range(levels)]])
-        self.aggr = nn.Conv2d(dim*levels, dim*levels, 1, 1, 0)
-
-        self.fuse = nn.Conv2d(dim * levels, dim, 1, 1, 0)
-        self.vit_fuse = ViTBlock(window_size, dim*levels, ffn_scale=ffn_scale, drop_path=drop_path)
-
-        self.activation = nn.GELU()
-
-        self.upsample_1 = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(dim, dim * (2 ** 2), kernel_size=3, stride=1, padding=1),
-                nn.PixelShuffle(2),
-                nn.GELU(),
-                nn.Conv2d(dim, dim, 3, 1, 1)
-
-            ) for _ in range(levels-1)
-        ])
-
-        self.re_zero = nn.ParameterList([nn.Parameter(torch.tensor(0.0)) for _ in range(self.levels)])
-
-    def forward(self, x):
-        B, C, H, W = x.size()
-
-        z_prior = 0
-        maps = []
-        for i in reversed(range(self.levels)):
-            # downsample to level size
-            if i > 0:
-                size = (H // 2 ** i, W // 2 ** i)
-                z = F.interpolate(x, size=size, mode='bilinear')
-            else:
-                z = x
-
-            z = self.vit[i](z + self.re_zero[i] * z_prior)
-
-            if i > 0:
-                z_prior = self.upsample_1[-i + 1](z)
-                maps.append(F.interpolate(z, size=(H, W), mode='bilinear'))
-
-        maps.append(z)
-        z = self.aggr(torch.cat(maps, dim=1))
-
-        # feature fusion
-        z = self.vit_fuse(z)
-        z = self.fuse(z) + x
-        return z
+# use dense resuidals for this for next version
 
 
 class DenseResidualBlock(nn.Module):
-    def __init__(self, n_sub_blocks, levels, window_size, dim, ffn_scale=2, drop_path=0.0):
+    def __init__(self, n_sub_blocks, levels, window_size, dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.0):
         super().__init__()
         self.n_sub_blocks = n_sub_blocks
-        self.layers = nn.Sequential(*[LHSABlock_4(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale, drop_path=drop_path) for _ in range(n_sub_blocks)])
+        self.layers = nn.ModuleList([MSFBlock(
+            levels=levels,
+            dim=dim,
+            window_size=window_size,
+            n_heads=n_heads,
+            n_heads_fuse=n_heads_fuse,
+            ffn_scale=ffn_scale,
+            drop_path=drop_path) for _ in range(n_sub_blocks)])
 
         self.alpha = nn.ParameterList([nn.Parameter(torch.tensor(0.2)) for _ in range(self.n_sub_blocks)])
+
         self.fuse = nn.ModuleList([
             nn.Sequential(nn.Conv2d(dim*(i+1), dim, 3, 1, 1), nn.LeakyReLU(negative_slope=0.2)) for i in range(self.n_sub_blocks)
         ])
 
         self.out_layer = nn.Sequential(
-            LHSABlock_4(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale, drop_path=drop_path),
+            MSFBlock(
+                levels=levels,
+                dim=dim,
+                window_size=window_size,
+                n_heads=n_heads,
+                n_heads_fuse=n_heads_fuse,
+                ffn_scale=ffn_scale,
+                drop_path=drop_path),
             nn.Conv2d(dim, dim, 3, 1, 1)
         )
 
@@ -315,56 +191,73 @@ class DenseResidualBlock(nn.Module):
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, n_sub_blocks, levels, window_size, dim, ffn_scale=2):
+    def __init__(self, n_sub_blocks, levels, window_size, dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.):
         super().__init__()
-        self.n_sub_blocks = n_sub_blocks
-        self.layers = nn.Sequential(*[LHSABlock_5(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale) for _ in range(n_sub_blocks)])
+        self.layers = nn.Sequential(*[MSFBlock(
+            levels=levels,
+            dim=dim,
+            window_size=window_size,
+            n_heads=n_heads,
+            n_heads_fuse=n_heads_fuse,
+            ffn_scale=ffn_scale,
+            drop_path=drop_path) for _ in range(n_sub_blocks)])
+
         self.out_layer = nn.Conv2d(dim, dim, 3, 1, 1)
 
     def forward(self, x):
-        residuals = x
-        for i in range(self.n_sub_blocks):
-            x = self.layers[i](x)
-        return self.out_layer(x) + residuals
+        return self.out_layer(self.layers(x)) + x
 
 class LMLTransformer(nn.Module):
-    def __init__(self, block_type, n_blocks, n_sub_blocks, levels, window_size, dim, features, scale_factor, ffn_scale=4, drop_path=0.1):
+    def __init__(self, block_type, n_blocks, n_sub_blocks, levels, window_size, dim, n_heads, n_heads_fuse, feature_dim, scale_factor, ffn_scale=4, drop_path=0.1):
         super().__init__()
 
         self.LHSA_levels = levels
         self.dim = dim
-        self.features = features
+        self.feature_dim = feature_dim
         self.scale_factor = scale_factor
         self.window_size = window_size
 
         self.feature_extractor = nn.Conv2d(3, dim, 3, 1, 1)
         if block_type != "default":
             self.layers = nn.Sequential(*[
-                DenseResidualBlock(n_sub_blocks=n_sub_blocks, levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale) for _ in range(n_blocks)])
+                DenseResidualBlock(
+                    n_sub_blocks=n_sub_blocks,
+                    levels=levels,
+                    dim=dim,
+                    window_size=window_size,
+                    n_heads=n_heads,
+                    n_heads_fuse=n_heads_fuse,
+                    ffn_scale=ffn_scale,
+                    drop_path=drop_path) for _ in range(n_blocks)])
         else:
             self.layers = nn.Sequential(*[
-                ResidualBlock(n_sub_blocks=n_sub_blocks, levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale) for _ in range(n_blocks)])
+                ResidualBlock(
+                    n_sub_blocks=n_sub_blocks,
+                    levels=levels,
+                    dim=dim,
+                    window_size=window_size,
+                    n_heads=n_heads,
+                    n_heads_fuse=n_heads_fuse,
+                    ffn_scale=ffn_scale,
+                    drop_path=drop_path) for _ in range(n_blocks)])
 
-        self.feature_transition = nn.Sequential(
-            #LHSABlock_3(levels=levels, dim=dim, window_size=window_size, ffn_scale=ffn_scale, drop_path=drop_path, fuse=True),
-            nn.Conv2d(dim, dim, 3, 1, 1)
-        )
+        self.feature_transition = nn.Conv2d(dim, dim, 3, 1, 1)
 
         img_reconstruction = [
-            nn.Conv2d(dim, features, 3, 1, 1),
+            nn.Conv2d(dim, feature_dim, 3, 1, 1),
             nn.GELU(),
-            nn.Conv2d(features, features, 3, 1, 1),
+            nn.Conv2d(feature_dim, feature_dim, 3, 1, 1),
         ]
         for i in range(int(np.log2(scale_factor))):
             img_reconstruction.extend([
-                nn.Conv2d(features, features * 4, 3, 1, 1),
+                nn.Conv2d(feature_dim, feature_dim * 4, 3, 1, 1),
                 nn.PixelShuffle(2),
                 nn.GELU(),
             ])
         img_reconstruction.extend([
-            nn.Conv2d(features, features, 3, 1, 1),
+            nn.Conv2d(feature_dim, feature_dim // 2, 3, 1, 1),
             nn.GELU(),
-            nn.Conv2d(features, 3, 3, 1, 1, )
+            nn.Conv2d(feature_dim // 2, 3, 3, 1, 1, )
         ])
 
         self.img_reconstruction = nn.Sequential(*img_reconstruction)
@@ -408,12 +301,6 @@ class LMLTransformer(nn.Module):
         # crop padding
         return x[:, :, :H*self.scale_factor, :W*self.scale_factor]
 
-
-# TODO possible reorder channels so it conv upscales to x4 instead of running constant dim
-
-# TODO potentially use adapative residual connections
-# TODO maybe downscaling with cnn
-# TODO Enhanced Multi-scale Fusion:
 
 if __name__ == '__main__':
     torch.set_float32_matmul_precision('high')

@@ -2,17 +2,19 @@ model:
   block_type: "default"
   n_blocks: 4
   n_sub_blocks: 4
-  levels: 3
-  dim: 96
-  features: 64
+  levels: 4
+  dim: 128
+  n_heads: 8
+  n_heads_fuse: 10
+  feature_dim: 64
   window_size: 8
   scale_factor: 4
 
 training:
-  learning_rate: 0.00015
+  learning_rate: 0.0002
   iterations: 500000
   epochs: 100
-  batch_size_per_gpu: 32
+  batch_size_per_gpu: 16
   accumulation_steps: 1
   model_ema: 0.999
   ema_start_epoch: 2

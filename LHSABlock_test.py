@@ -167,39 +167,32 @@ class LHSABlock_4(nn.Module):
 
 
 class LHSABlock_5(nn.Module):
-    def __init__(self, levels, window_size, dim, ffn_scale=2, drop_path=0.0):
+    def __init__(self, levels, window_size, dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.0):
         super().__init__()
         self.levels = levels
         self.dim = dim
 
-        self.level_dims = [dim // (4**i) for i in range(levels)]
-        total_dim = sum(self.level_dims)
-
-        self.sub_spatial_vit = self.vit = nn.ModuleList([*[ViTBlock(window_size, dim, ffn_scale=ffn_scale, drop_path=drop_path) for _ in range(levels-1)]])
-
-        self.merge = nn.ModuleList([
-            nn.Sequential(nn.Conv2d(dim, dim // (4**i), 3, 1, 1), nn.PixelUnshuffle(2**i)) for i in range(1, levels)
+        self.total_dim = sum([dim // (4**i) for i in range(levels)])
+        self.level_layer = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(dim, dim // (4 ** i), 3, 1, 1),
+                nn.PixelUnshuffle(2 ** i),
+                ViTBlock(window_size, dim, n_heads=n_heads, ffn_scale=ffn_scale, drop_path=drop_path),
+                nn.Conv2d(dim, dim, 3, 1, 1),
+                nn.PixelShuffle(2 ** i)
+            ) for i in range(1, levels)
         ])
 
-        self.unmerge = nn.ModuleList([nn.PixelShuffle(2**i) for i in range(1, levels)])
-
-        self.aggr = nn.Conv2d(total_dim, total_dim, 1, 1)
-
-        self.vit_fuse = ViTBlock(window_size, total_dim, ffn_scale=ffn_scale, drop_path=drop_path)
         self.fuse = nn.Sequential(
-            nn.Conv2d(total_dim, dim, 1, 1),
+            ViTBlock(window_size, self.total_dim, n_heads=n_heads_fuse, ffn_scale=ffn_scale, drop_path=drop_path),
+            nn.Conv2d(self.total_dim, dim, 1, 1),
             nn.Conv2d(dim, dim, 3, 1, 1)
         )
 
     def forward(self, x):
         maps = [x]
         for i in range(self.levels-1):
-            z = self.merge[i](x)
-            z = self.sub_spatial_vit[i](z)
-            z = self.unmerge[i](z)
-            maps.append(z)
+            maps.append(self.level_layer[i](x))
 
-        z = self.aggr(torch.cat(maps, dim=1))
-        z = self.vit_fuse(z)
-        z = self.fuse(z) + x
+        z = self.fuse(torch.cat(maps, dim=1)) + x
         return z
