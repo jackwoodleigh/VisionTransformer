@@ -13,8 +13,8 @@ model:
 
 training:
   learning_rate: 0.00015
-  iterations: 340000
-  epochs: 68
+  iterations: 500000
+  epochs: 100
   batch_size_per_gpu: 16
   accumulation_steps: 1
   model_ema: 0.999
