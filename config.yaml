@@ -2,24 +2,25 @@ model:
   block_type: "default"
   n_blocks: 4
   n_sub_blocks: 4
-  levels: 4
+  levels: 3
   dim: 128
-  n_heads: 8
-  n_heads_fuse: 10
+  level_dim: 64
+  n_heads: 4
+  n_heads_fuse: 4
   feature_dim: 64
   window_size: 8
   scale_factor: 4
 
 training:
-  learning_rate: 0.0002
-  iterations: 500000
-  epochs: 100
+  learning_rate: 0.00015
+  iterations: 340000
+  epochs: 68
   batch_size_per_gpu: 16
   accumulation_steps: 1
   model_ema: 0.999
   ema_start_epoch: 2
   criterion:
-    CharbonnierLoss: 1.0
+    L1: 1.0
     #FFTLoss: 0.05
 
 data:
@@ -38,7 +39,7 @@ tools:
   logging_path: "Logs"
   save_model_every_i_epoch: 1
   model_save_name: ""
-  load_model_save_name: ""
+  load_model_save_name: "model_save_exalted-dawn-769.pth"
   load_optimizer: True
   multi_gpu_enable: False
   use_lmdb: True

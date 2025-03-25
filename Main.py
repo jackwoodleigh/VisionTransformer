@@ -46,28 +46,8 @@ def rotate_if_wide(img):
         return img.rotate(-90, expand=True)
     return img
 
-def load_dataset(config, rank=0):
-    training_pad_transform = PadImg(config["data"]["training_image_size"])
-    validation_pad_transform = PadImg(config["data"]["validation_image_size"])
 
-    if config["data"]["transform_data"]:
-        transform = transforms.Compose([
-            PadImg(config["data"]["training_image_size"]),
-            transforms.RandomCrop(config["data"]["training_image_size"]),
-            transforms.RandomHorizontalFlip(p=0.5),
-            random_rotate,
-            #transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-            transforms.ToTensor(),
-            #transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
-        ])
-    else:
-        transform = transforms.Compose([
-            PadImg(config["data"]["training_image_size"]),
-            #transforms.Resize(config["data"]["training_image_size"]),
-            transforms.RandomCrop(config["data"]["training_image_size"]),
-            transforms.ToTensor(),
-            #transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
-        ])
+def load_data(config, rank=0, multi_gpu=False):
 
     if config["data"]["data_subset"] != 0:
         sub = config["data"]["data_subset"]
@@ -95,6 +75,16 @@ def load_dataset(config, rank=0):
         path += "_lmdb"
 
     torch.cuda.synchronize()
+
+    transform = transforms.Compose([
+        PadImg(config["data"]["training_image_size"]),
+        transforms.RandomCrop(config["data"]["training_image_size"]),
+        transforms.RandomHorizontalFlip(p=0.5),
+        random_rotate,
+        # transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+        transforms.ToTensor(),
+    ])
+
     train_dataset = SuperResolutionDataset(
         root=path,
         scale_values=config["model"]["scale_factor"],
@@ -109,13 +99,32 @@ def load_dataset(config, rank=0):
         scale_values=config["model"]["scale_factor"],
         transform=transforms.Compose([
             rotate_if_wide,
-            #PadImg(config["data"]["validation_image_size"]),
             transforms.RandomCrop(config["data"]["validation_image_size"]),
             transforms.ToTensor()])
-            #transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.25, 0.25, 0.25])
         )
 
-    return train_dataset, test_dataset
+    sampler = None
+    if multi_gpu:
+        sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config["training"]["batch_size_per_gpu"],
+        shuffle=(sampler is None),
+        num_workers=config["data"]["num_dataloader_workers"],
+        pin_memory=True,
+        sampler=sampler
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=2,
+        shuffle=False,
+        num_workers=config["data"]["num_dataloader_workers"],
+        pin_memory=True
+    )
+
+    return train_dataset, test_dataset, train_loader, test_loader, sampler
 
 
 def initialize(config, rank=0, world_size=0):
@@ -123,14 +132,12 @@ def initialize(config, rank=0, world_size=0):
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.deterministic = False
 
-    # Multi-GPU setup
     multi_gpu = False
-    if rank == 0 and config["tools"]["multi_gpu_enable"]:
-        print("Multi-GPU Support Enabled.")
-        print("Total GPUs in usage: ", torch.cuda.device_count())
-
     if config["tools"]["multi_gpu_enable"]:
         multi_gpu = True
+        if rank == 0:
+            print("Multi-GPU Support Enabled.")
+            print("Total GPUs in usage: ", torch.cuda.device_count())
         #os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
         #os.environ.setdefault("MASTER_PORT", "29500")
         dist.init_process_group(backend='gloo', init_method="tcp://127.0.0.1:29500?use_libuv=0", rank=rank, world_size=world_size)
@@ -144,6 +151,7 @@ def initialize(config, rank=0, world_size=0):
         levels=config["model"]["levels"],
         window_size=config["model"]["window_size"],
         dim=config["model"]["dim"],
+        level_dim=config["model"]["level_dim"],
         n_heads=config["model"]["n_heads"],
         n_heads_fuse=config["model"]["n_heads_fuse"],
         feature_dim=config["model"]["feature_dim"],
@@ -163,16 +171,21 @@ def initialize(config, rank=0, world_size=0):
         img_range=4.0
     )'''
 
-
     # Multi-GPU model
     model = model.to(f"cuda:{rank}")
     if multi_gpu:
         model = DDP(model, device_ids=[rank])
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config["training"]["learning_rate"], betas=(0.9, 0.99))
+    optimizer = torch.optim.Adam(model.parameters(), lr=config["training"]["learning_rate"], betas=(0.9, 0.99))
     criterion = Criterion(config["training"]["criterion"])
 
-    helper = ModelHelper(model, optimizer, criterion, ema_beta=config["training"]["model_ema"], multi_gpu=multi_gpu, rank=rank)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["training"]["iterations"], eta_min=1e-5)
+    #milestones = [300000, 500000, 650000, 700000, 750000]
+    '''milestones = [40000, 190000, 240000, 290000]
+    # [250000, 400000, 450000, 475000]
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.5)'''
+
+    helper = ModelHelper(model, optimizer, scheduler, criterion, ema_beta=config["training"]["model_ema"], multi_gpu=multi_gpu, rank=rank)
 
     size = helper.get_parameter_count()
     config["model_size"] = size
@@ -187,17 +200,8 @@ def initialize(config, rank=0, world_size=0):
             load_optimizer=config["tools"]["load_optimizer"]
         )
 
-    # Loading Dataset
-    train_dataset, test_dataset = load_dataset(config, rank)
-
-    sampler = None
-    if multi_gpu:
-        sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
-
-    # Loading Data Loader
-    train_loader = DataLoader(train_dataset, batch_size=config["training"]["batch_size_per_gpu"], shuffle=(sampler is None), num_workers=config["data"]["num_dataloader_workers"], pin_memory=True, sampler=sampler)
-
-    test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=config["data"]["num_dataloader_workers"], pin_memory=True)
+    # Loading Datasetz
+    train_dataset, test_dataset, train_loader, test_loader, sampler = load_data(config, rank, multi_gpu)
 
     return model, helper, (train_dataset, test_dataset, sampler, train_loader, test_loader)
 

@@ -196,3 +196,100 @@ class LHSABlock_5(nn.Module):
 
         z = self.fuse(torch.cat(maps, dim=1)) + x
         return z
+
+class MSFBlock_1(nn.Module):
+    def __init__(self, levels, window_size, dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.0):
+        super().__init__()
+        self.levels=levels
+        self.level_layer = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(dim, dim // (4 ** i), 3, 1, 1),
+                nn.PixelUnshuffle(2 ** i),
+                ViTBlock(window_size, dim, n_heads=n_heads, ffn_scale=ffn_scale, drop_path=drop_path),
+                nn.Conv2d(dim, dim, 3, 1, 1),
+                nn.PixelShuffle(2 ** i)
+            ) for i in range(1, levels)
+        ])
+
+        total_dim = sum([dim // (4 ** i) for i in range(levels)])
+        self.fuse = nn.Sequential(
+            ViTBlock(window_size, total_dim, n_heads=n_heads_fuse, ffn_scale=ffn_scale, drop_path=drop_path),
+            nn.Conv2d(total_dim, dim, 1, 1),
+            nn.Conv2d(dim, dim, 3, 1, 1)
+        )
+
+    def forward(self, x):
+        maps = [x]
+        for i in range(self.levels-1):
+            maps.append(self.level_layer[i](x))
+        return self.fuse(torch.cat(maps, dim=1)) + x
+
+
+class MSFBlock_2(nn.Module):
+    def __init__(self, levels, window_size, dim, level_dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.0):
+        super().__init__()
+        self.levels = levels
+        # 1, 64, 64, 64 -> 1, 8, 64, 64 -> 1, 32, 32, 32 -> 1, 8, 64, 64
+        self.level_layer = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(dim, level_dim // (4 ** i), 3, 1, 1),
+                nn.PixelUnshuffle(2 ** i),
+                ViTBlock(window_size, level_dim, n_heads=n_heads, ffn_scale=ffn_scale, drop_path=drop_path),
+                nn.Conv2d(level_dim, level_dim, 3, 1, 1),
+                nn.PixelShuffle(2 ** i)
+            ) for i in range(1, levels)
+        ])
+
+        total_level_dim = sum([level_dim // (4 ** i) for i in range(1, levels)])
+        self.post_level_fuse = nn.Conv2d(total_level_dim, dim//4, 1, 1)
+
+        self.fuse = nn.Sequential(
+            ViTBlock(window_size, dim + dim//4, n_heads=n_heads_fuse, ffn_scale=ffn_scale, drop_path=drop_path),
+            nn.Conv2d(dim + dim//4, dim, 1, 1),
+            nn.Conv2d(dim, dim, 3, 1, 1)
+        )
+
+    def forward(self, x):
+        maps = []
+        for i in range(self.levels-1):
+            maps.append(self.level_layer[i](x))
+
+        levels = self.post_level_fuse(torch.cat(maps, dim=1))
+        return self.fuse(torch.cat([x, levels], dim=1)) + x
+
+
+# use dense resuidals for this for next version
+
+# combine layers before applying ?
+
+class MSFBlock_3(nn.Module):
+    def __init__(self, levels, window_size, dim, level_dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.0):
+        super().__init__()
+        self.levels = levels
+        # 1, 64, 64, 64 -> 1, 8, 64, 64 -> 1, 32, 32, 32 -> 1, 8, 64, 64
+        self.level_layer = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(dim, level_dim // (4 ** i), 3, 1, 1),
+                nn.PixelUnshuffle(2 ** i),
+                ViTBlock(window_size, level_dim, n_heads=n_heads, ffn_scale=ffn_scale, drop_path=drop_path),
+                nn.Conv2d(level_dim, level_dim, 3, 1, 1),
+                nn.PixelShuffle(2 ** i)
+            ) for i in range(1, levels)
+        ])
+
+        total_level_dim = sum([level_dim // (4 ** i) for i in range(1, levels)])
+        self.post_level_fuse = nn.Conv2d(total_level_dim, dim//4, 1, 1)
+
+        self.fuse = nn.Sequential(
+            ViTBlock(window_size, dim + dim//4, n_heads=n_heads_fuse, ffn_scale=ffn_scale, drop_path=drop_path),
+            nn.Conv2d(dim + dim//4, dim, 1, 1),
+            nn.Conv2d(dim, dim, 3, 1, 1)
+        )
+
+    def forward(self, x):
+        maps = []
+        for i in range(self.levels-1):
+            maps.append(self.level_layer[i](x))
+
+        levels = self.post_level_fuse(torch.cat(maps, dim=1))
+        return self.fuse(torch.cat([x, levels], dim=1)) + x

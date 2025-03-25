@@ -12,20 +12,24 @@ from torch.amp import autocast, GradScaler
 #from torch.cuda.amp import autocast, GradScaler
 from torchvision.transforms import ToPILImage
 from PIL import Image
-from utils import save_images_comparison2, save_images, tensor_to_pil, create_image_grid, infinite_dataloader, calculate_psnr, calculate_ssim
+from utils import save_images_comparison2, save_images, tensor_to_pil, create_image_grid, infinite_dataloader, calculate_psnr_pt, calculate_ssim_pt
 from EMA import ParameterEMA
 import copy
 
 
 class ModelHelper:
-    def __init__(self, model, optimizer, criterion, multi_gpu=False, ema_beta=0.995, device="cuda", rank=0):
+    def __init__(self, model, optimizer, scheduler, criterion, multi_gpu=False, ema_beta=0.995, device="cuda", rank=0):
         self.model = model
         self.optimizer = optimizer
         self.criterion = criterion
+        self.scheduler = scheduler
 
         self.multi_gpu = multi_gpu
         self.rank = rank
-        self.device = f"cuda:{rank}"
+        if device == "cuda":
+            self.device = f"cuda:{rank}"
+        else:
+            self.device = device
 
         self.ema = ParameterEMA(beta=ema_beta)
         self.ema_model = copy.deepcopy(self.model).eval().requires_grad_(False).to(self.device)
@@ -65,19 +69,14 @@ class ModelHelper:
 
         print(f"Loaded model from: {path}")
 
-    def model_call(self, model, lr, use_checkpoint=True):
-        if use_checkpoint:
-            return checkpoint(model, lr, use_reentrant=False)
-        else:
-            return model(lr)
-
-    def update_params(self):
-        self.scaler.unscale_(self.optimizer)
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-        self.optimizer.zero_grad(set_to_none=True)
-        self.ema.step_ema(ema_model=self.ema_model, model=self.model, new_ema=self.new_ema)
+    def sync(self, sec=0, clear_cache=False):
+        if self.multi_gpu:
+            torch.distributed.barrier()
+        torch.cuda.synchronize()
+        if clear_cache:
+            torch.cuda.empty_cache()
+        if sec != 0:
+            time.sleep(sec)
 
     def sample_model(self, random_sample, dataset, save_img=False, save_compare=False, use_ema_model=True):
         r = random.randint(0, len(dataset)-random_sample)
@@ -107,41 +106,35 @@ class ModelHelper:
         else:
             return hr_p, hr if hr is not None else None
 
+    def model_call(self, model, lr, use_checkpoint=True):
+        if use_checkpoint:
+            return checkpoint(model, lr, use_reentrant=False)
+        else:
+            return model(lr)
+
     def predict(self, hr, lr, use_ema_model=False):
         with autocast(device_type="cuda"):
             if use_ema_model:
                 hr_p = self.model_call(self.ema_model, lr.to(self.device))
             else:
-
                 hr_p = self.model_call(self.model, lr.to(self.device))
-
             loss = self.criterion(hr_p.to(self.device), hr.to(self.device))
-
         return loss, hr_p
 
-    def validation_loop(self, test_loader, e, epochs, ema_start_epoch):
-        epoch_validation_losses = []
-        ssim = []
-        psnr = []
-        self.model.eval()
-        self.ema_model.eval()
-        with torch.no_grad():
-            pbar = tqdm(test_loader, disable=(self.rank != 0), desc=f"Validating - Epoch {e + 1}/{epochs}", leave=True, dynamic_ncols=True)
-            for i, (hr, lr) in enumerate(pbar):
-                loss, hr_p = self.predict(hr, lr, use_ema_model=e + 1 > ema_start_epoch or not self.new_ema)
-                epoch_validation_losses.append(loss.item())
-                ssim.append(calculate_ssim(hr_p.float(), hr.to(self.device).float()).item())
-                psnr.append(calculate_psnr(hr_p.float(), hr.to(self.device).float()).mean().item())
+    def update_params(self):
+        self.scaler.unscale_(self.optimizer)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.optimizer.zero_grad(set_to_none=True)
+        self.ema.step_ema(ema_model=self.ema_model, model=self.model, new_ema=self.new_ema)
 
-        return epoch_validation_losses, ssim, psnr
-
-    def training_loop(self, train_itr, scheduler, itrs_per_epoch, e, total_epochs, accumulation_steps, ema_loss, ema_loss_decay, ema_start_epoch):
+    def training_loop(self, train_itr, itrs_per_epoch, e, total_epochs, accumulation_steps, ema_loss, ema_loss_decay, ema_start_epoch):
+        self.model.train()
         epoch_training_losses = []
         loss_accumulator = 0
         pbar = tqdm(range(itrs_per_epoch), disable=(self.rank != 0), desc=f"Training - Epoch {e + 1}/{total_epochs}", leave=True, dynamic_ncols=True)
         for _ in pbar:
-            self.model.train()
-
             # gradient accumulation
             for _ in range(accumulation_steps):
                 hr, lr = next(train_itr)
@@ -152,7 +145,7 @@ class ModelHelper:
 
             self.update_params()
             epoch_training_losses.append(loss_accumulator)
-            scheduler.step()
+            self.scheduler.step()
 
             if e + 1 < ema_start_epoch:
                 ema_loss = np.mean(epoch_training_losses)
@@ -169,6 +162,22 @@ class ModelHelper:
 
         return epoch_training_losses, ema_loss
 
+    def validation_loop(self, test_loader, e, epochs, ema_start_epoch):
+        epoch_validation_losses = []
+        ssim = []
+        psnr = []
+        self.model.eval()
+        self.ema_model.eval()
+        with torch.no_grad():
+            pbar = tqdm(test_loader, disable=(self.rank != 0), desc=f"Validating - Epoch {e + 1}/{epochs}", leave=True, dynamic_ncols=True)
+            for i, (hr, lr) in enumerate(pbar):
+                loss, hr_p = self.predict(hr, lr, use_ema_model=e + 1 > ema_start_epoch or not self.new_ema)
+                epoch_validation_losses.append(loss.item())
+                ssim.append(calculate_ssim_pt(hr_p.float(), hr.to(self.device).float(), crop_border=3).mean().item())
+                psnr.append(calculate_psnr_pt(hr_p.float(), hr.to(self.device).float(), crop_border=3).mean().item())
+
+        return epoch_validation_losses, ssim, psnr
+
     def train_model(self, train_loader, test_loader, config, train_dataset=None, test_dataset=None):
         iterations = config["training"]["iterations"]
         total_epochs = config["training"]["epochs"]
@@ -182,41 +191,27 @@ class ModelHelper:
         self.ema_model.eval()
         self.optimizer.zero_grad(set_to_none=True)
 
-        itrs_per_epoch = (iterations // total_epochs)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=iterations, eta_min=1e-5)
-
         ema_loss_decay = 0.9999
         ema_loss = None
         self.ema.start_step = len(train_loader) * ema_start_epoch // accumulation_steps
 
+        itrs_per_epoch = (iterations // total_epochs)
         train_itr = infinite_dataloader(train_loader)
-        print(self.rank)
-
-        if self.multi_gpu:
-            torch.distributed.barrier()
-        torch.cuda.synchronize()
-        time.sleep(2)
+        self.sync(sec=2)
 
         for e in range(total_epochs):
             if self.multi_gpu:
                 train_loader.sampler.set_epoch(e)
 
             # Training Loop
-            epoch_training_losses, ema_loss = self.training_loop(train_itr, scheduler, itrs_per_epoch, e, total_epochs, accumulation_steps, ema_loss, ema_loss_decay, ema_start_epoch)
+            epoch_training_losses, ema_loss = self.training_loop(train_itr, itrs_per_epoch, e, total_epochs, accumulation_steps, ema_loss, ema_loss_decay, ema_start_epoch)
 
-            torch.cuda.synchronize()
-            if self.multi_gpu:
-                torch.distributed.barrier()
-            time.sleep(2)
+            self.sync(sec=2)
 
             # Validation Loop
             epoch_validation_losses, ssim, psnr = self.validation_loop(test_loader, e, total_epochs, ema_start_epoch)
 
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-            if self.multi_gpu:
-                torch.distributed.barrier()
-            time.sleep(2)
+            self.sync(sec=2, clear_cache=True)
 
             if self.rank == 0:
 
@@ -242,10 +237,7 @@ class ModelHelper:
 
                     wandb.log(log)
 
-            if self.multi_gpu:
-                torch.distributed.barrier()
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
+            self.sync(clear_cache=True)
             if self.rank == 0:
                 print("###################################################################")
             time.sleep(2)
