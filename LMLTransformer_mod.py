@@ -268,6 +268,7 @@ class LMLTransformer(nn.Module):
         self.feature_dim = feature_dim
         self.scale_factor = scale_factor
         self.window_size = window_size
+        self.levels=levels
 
         self.feature_extractor = nn.Conv2d(3, dim, 3, 1, 1)
         if block_type != "default":
@@ -317,12 +318,25 @@ class LMLTransformer(nn.Module):
 
         self.apply(self.init_weights)
 
-    def padding(self, x):
+    def padding2(self, x):
         _, _, h, w = x.size()
         scaled_size = self.window_size
 
         mod_pad_h = (scaled_size - h % scaled_size) % scaled_size
         mod_pad_w = (scaled_size - w % scaled_size) % scaled_size
+        x = F.pad(x, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
+        return x
+
+    def padding(self, x):
+        _, _, h, w = x.size()
+
+        if self.levels <= 0:
+            required_divisor = self.window_size
+        else:
+            required_divisor = self.window_size * (2 ** (self.levels - 1))
+        mod_pad_h = (required_divisor - h % required_divisor) % required_divisor
+        mod_pad_w = (required_divisor - w % required_divisor) % required_divisor
+
         x = F.pad(x, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
         return x
 

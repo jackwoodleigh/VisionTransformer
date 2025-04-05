@@ -27,9 +27,9 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 
 class PadImg:
-    def __init__(self, size):
-        self.final_width = size
-        self.final_height = size
+    def __init__(self, height, width):
+        self.final_width = width
+        self.final_height = height
     def __call__(self, img):
         w, h = img.size
         pad_w = max(0, self.final_width - w)
@@ -77,7 +77,7 @@ def load_data(config, rank=0, multi_gpu=False):
     torch.cuda.synchronize()
 
     transform = transforms.Compose([
-        PadImg(config["data"]["training_image_size"]),
+        PadImg(config["data"]["training_image_size"],config["data"]["training_image_size"]),
         transforms.RandomCrop(config["data"]["training_image_size"]),
         transforms.RandomHorizontalFlip(p=0.5),
         random_rotate,
@@ -99,7 +99,9 @@ def load_data(config, rank=0, multi_gpu=False):
         scale_values=config["model"]["scale_factor"],
         transform=transforms.Compose([
             rotate_if_wide,
-            transforms.RandomCrop(config["data"]["validation_image_size"]),
+            #PadImg(512, 1024),
+            #transforms.RandomCrop((512, 1024)),
+            #transforms.RandomCrop(config["data"]["validation_image_size"]),
             transforms.ToTensor()])
         )
 
@@ -118,7 +120,7 @@ def load_data(config, rank=0, multi_gpu=False):
 
     test_loader = DataLoader(
         test_dataset,
-        batch_size=2,
+        batch_size=1,
         shuffle=False,
         num_workers=config["data"]["num_dataloader_workers"],
         pin_memory=True
@@ -239,10 +241,19 @@ def test(rank, config, world_size=0):
     model, helper, (train_dataset, test_dataset, sampler, train_loader, test_loader) = initialize(config, rank, world_size)
     #from LMDB import read_from_lmdb, get_keys
 
-    #epoch_validation_losses, ssim, psnr = helper.validation_loop(test_loader, 10, 10, 20)
-    #print(np.mean(ssim), np.mean(psnr))
+    epoch_validation_losses, ssim, psnr = helper.validation_loop(test_loader, 10, 10, 20)
+    print(np.mean(ssim), np.mean(psnr))
     #img = read_from_lmdb(path, )
     print()
+    test_dataset = SuperResolutionDataset(
+        root=os.path.join(config["data"]["data_path"], config["data"]["testing_data_name"]),
+        scale_values=config["model"]["scale_factor"],
+        transform=transforms.Compose([
+            rotate_if_wide,
+            PadImg(512, 1024),
+            transforms.RandomCrop((512, 1024)),
+            transforms.ToTensor()])
+    )
     helper.sample_model(random_sample=3, dataset=test_dataset, save_img=True, save_compare=True, use_ema_model=True)
     '''ssim = []
     psnr = []
@@ -263,14 +274,14 @@ if __name__ == '__main__':
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file)
 
-    #test(config=config, rank=0, world_size=0)
+    test(config=config, rank=0, world_size=0)
 
-    # Training
+    '''# Training
     if config["tools"]["multi_gpu_enable"]:
         world_size = torch.cuda.device_count()
         mp.spawn(training, args=(config, world_size,), nprocs=world_size, join=True)
     else:
-        training(config=config, rank=0, world_size=0)
+        training(config=config, rank=0, world_size=0)'''
 
 
 
