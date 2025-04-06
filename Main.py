@@ -47,6 +47,23 @@ def rotate_if_wide(img):
     return img
 
 
+class CropDivisibleBy:
+    def __init__(self, divisor=4):
+        self.divisor = divisor
+    def __call__(self, img):
+        w, h = img.size
+        new_h = (h // self.divisor) * self.divisor
+        new_w = (w // self.divisor) * self.divisor
+        if new_h == 0:
+            new_h = self.divisor
+        if new_w == 0:
+            new_w = self.divisor
+        cropped_img = F.center_crop(img, (new_h, new_w))
+        return cropped_img
+
+    def __repr__(self):
+        return self.__class__.__name__ + f'(divisor={self.divisor})'
+
 def load_data(config, rank=0, multi_gpu=False):
 
     if config["data"]["data_subset"] != 0:
@@ -99,6 +116,7 @@ def load_data(config, rank=0, multi_gpu=False):
         scale_values=config["model"]["scale_factor"],
         transform=transforms.Compose([
             rotate_if_wide,
+            CropDivisibleBy(4),
             #PadImg(512, 1024),
             #transforms.RandomCrop((512, 1024)),
             #transforms.RandomCrop(config["data"]["validation_image_size"]),
@@ -241,33 +259,21 @@ def test(rank, config, world_size=0):
     model, helper, (train_dataset, test_dataset, sampler, train_loader, test_loader) = initialize(config, rank, world_size)
     #from LMDB import read_from_lmdb, get_keys
 
-    epoch_validation_losses, ssim, psnr = helper.validation_loop(test_loader, 10, 10, 20)
-    print(np.mean(ssim), np.mean(psnr))
-    #img = read_from_lmdb(path, )
-    print()
+    '''epoch_validation_losses, ssim, psnr = helper.validation_loop(test_loader, 10, 10, 20)
+    print(np.mean(ssim), np.mean(psnr))'''
+
     test_dataset = SuperResolutionDataset(
         root=os.path.join(config["data"]["data_path"], config["data"]["testing_data_name"]),
         scale_values=config["model"]["scale_factor"],
         transform=transforms.Compose([
             rotate_if_wide,
+            CropDivisibleBy(4),
             PadImg(512, 1024),
             transforms.RandomCrop((512, 1024)),
             transforms.ToTensor()])
     )
     helper.sample_model(random_sample=3, dataset=test_dataset, save_img=True, save_compare=True, use_ema_model=True)
-    '''ssim = []
-    psnr = []
-    # Validation
-    with torch.no_grad():
-        #pbar = tqdm(test_loader, desc=f"Validating - Epoch {e + 1}/{epochs}", leave=True, dynamic_ncols=True)
-        for i, (hr, lr) in tqdm(enumerate(train_loader)):
-            loss, hr_p = helper.predict(hr, lr, use_ema_model=True)
 
-            hr = hr.to("cuda")
-            ssim.append(calculate_ssim(hr_p.float(), hr.float()).item())
-            psnr.append(calculate_psnr(hr_p.float(), hr.float()).mean().item())
-    print(np.mean(ssim))
-    print(np.mean(psnr))'''
 
 
 if __name__ == '__main__':

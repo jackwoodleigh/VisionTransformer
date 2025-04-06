@@ -79,7 +79,10 @@ class ModelHelper:
             time.sleep(sec)
 
     def sample_model(self, random_sample, dataset, save_img=False, save_compare=False, use_ema_model=True):
-        r = random.randint(0, len(dataset)-random_sample)
+
+        '''r = [23, 50, 78]
+        stack = [dataset[i] for i in r]'''
+        r = random.randint(0, len(dataset) - random_sample)
         stack = [dataset[i] for i in range(r, r + random_sample)]
         hr_list, lr_list = zip(*stack)
         lr = torch.stack(lr_list).to(self.device)
@@ -106,11 +109,18 @@ class ModelHelper:
         else:
             return hr_p, hr if hr is not None else None
 
-    def model_call(self, model, lr, use_checkpoint=True):
-        if use_checkpoint:
-            return checkpoint(model, lr, use_reentrant=False)
+    def model_call(self, model, lr, use_checkpoint=True, no_grad=False):
+        if no_grad:
+            with torch.no_grad():
+                if use_checkpoint:
+                    return checkpoint(model, lr, use_reentrant=False)
+                else:
+                    return model(lr)
         else:
-            return model(lr)
+            if use_checkpoint:
+                return checkpoint(model, lr, use_reentrant=False)
+            else:
+                return model(lr)
 
     def predict(self, hr, lr, use_ema_model=False):
         with autocast(device_type="cuda"):
@@ -173,8 +183,8 @@ class ModelHelper:
             for i, (hr, lr) in enumerate(pbar):
                 loss, hr_p = self.predict(hr, lr, use_ema_model=e + 1 > ema_start_epoch or not self.new_ema)
                 epoch_validation_losses.append(loss.item())
-                ssim.append(calculate_ssim_pt(hr_p.float(), hr.to(self.device).float(), crop_border=3).mean().item())
-                psnr.append(calculate_psnr_pt(hr_p.float(), hr.to(self.device).float(), crop_border=3).mean().item())
+                ssim.append(calculate_ssim_pt(hr_p.float(), hr.to(self.device).float(), crop_border=5).mean().item())
+                psnr.append(calculate_psnr_pt(hr_p.float(), hr.to(self.device).float(), crop_border=5).mean().item())
 
         return epoch_validation_losses, ssim, psnr
 
