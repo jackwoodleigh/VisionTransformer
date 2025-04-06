@@ -109,7 +109,11 @@ class ModelHelper:
         else:
             return hr_p, hr if hr is not None else None
 
-    def model_call(self, model, lr, use_checkpoint=True, no_grad=False):
+    def model_call(self, lr, use_ema_model=False, use_checkpoint=True, no_grad=False):
+        if use_ema_model:
+            model = self.ema_model
+        else:
+            model = self.model
         if no_grad:
             with torch.no_grad():
                 if use_checkpoint:
@@ -124,10 +128,7 @@ class ModelHelper:
 
     def predict(self, hr, lr, use_ema_model=False):
         with autocast(device_type="cuda"):
-            if use_ema_model:
-                hr_p = self.model_call(self.ema_model, lr.to(self.device))
-            else:
-                hr_p = self.model_call(self.model, lr.to(self.device))
+            hr_p = self.model_call(lr.to(self.device), use_ema_model=use_ema_model)
             loss = self.criterion(hr_p.to(self.device), hr.to(self.device))
         return loss, hr_p
 
