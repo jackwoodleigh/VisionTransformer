@@ -98,7 +98,7 @@ class ModelHelper:
 
             hr_p = []
             for i in range(random_sample):
-                hr_p.append(self.model_call(model, lr[i].unsqueeze(0)).squeeze(0))
+                hr_p.append(self.model_call(lr[i].unsqueeze(0), no_grad=True).squeeze(0))
             hr_p = torch.stack(hr_p, dim=0)
 
         if save_img:
