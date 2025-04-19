@@ -10,6 +10,8 @@ In this project, we create a novel vision transformer architecture designed to p
 ### Results so far...
 ![sample](https://github.com/jackwoodleigh/VisionTransformer/blob/main/comparisonzoom.png)
 
+#### Image Quality (PSNR / SSIM)
+
 | Method  | Set5           | Set14          | BSD100         | Urban100       | Manga109       |
 |---------|----------------|----------------|----------------|----------------|----------------|
 | Bicubic | 26.37 / 0.7891 | 23.65 / 0.6756 | 23.28 / 0.6403 | 20.5 / 0.6316  | 22.56 / 0.7648 |
