@@ -121,8 +121,8 @@ def initialize(config, rank=0, world_size=0):
         dist.init_process_group(backend='gloo', init_method="tcp://127.0.0.1:29500?use_libuv=0", rank=rank, world_size=world_size)
         torch.cuda.set_device(rank)
 
-    from LMLTransformer_mod import LMLTransformer
-    model = LMLTransformer(
+    from MSFT_Arch import MSFTransformer
+    model = MSFTransformer(
         block_type=config["model"]["block_type"],
         n_blocks=config["model"]["n_blocks"],
         n_sub_blocks=config["model"]["n_sub_blocks"],

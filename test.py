@@ -1,7 +1,7 @@
 import yaml
 import torch
 from fvcore.nn import parameter_count_table, FlopCountAnalysis
-from LMLTransformer_mod import LMLTransformer
+from MSFT_Arch import LMLTransformer
 
 with open('config.yaml', 'r') as file:
     config = yaml.safe_load(file)

@@ -255,7 +255,7 @@ class ResidualBlock(nn.Module):
     def forward(self, x):
         return self.out_layer(self.layers(x)) + x
 
-class LMLTransformer(nn.Module):
+class MSFTransformer(nn.Module):
     def __init__(
             self,
             block_type,
