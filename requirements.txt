@@ -5,4 +5,4 @@ torchmetrics
 opencv-python
 lmdb
 timm
-
+kornia

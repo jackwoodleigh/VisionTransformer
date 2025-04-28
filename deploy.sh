@@ -24,6 +24,7 @@ if [ "$FULL" != "F" ]; then
 
 fi
 
+scp -r -P ${PORT} toolkit root@${HOST}:/workspace/proj
 scp -P ${PORT} *.py root@${HOST}:/workspace/proj
 scp -P ${PORT} requirements.txt root@${HOST}:/workspace/proj
 scp -P ${PORT} config.yaml root@${HOST}:/workspace/proj

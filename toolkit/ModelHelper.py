@@ -5,17 +5,15 @@ import time
 import torch
 import wandb
 from tqdm.auto import tqdm
-from torch.nn.functional import mse_loss
 import numpy as np
 from torch.utils.checkpoint import checkpoint
 from torch.amp import autocast, GradScaler
 #from torch.cuda.amp import autocast, GradScaler
-from torchvision.transforms import ToPILImage
-from PIL import Image
-from utils import save_images_comparison2, save_images, tensor_to_pil, create_image_grid, infinite_dataloader, calculate_psnr_pt, calculate_ssim_pt
-from EMA import ParameterEMA
+from toolkit.utils import save_images_comparison, save_images, tensor_to_pil, create_image_grid, infinite_dataloader, calculate_psnr_pt_y_channel, calculate_ssim_pt_y_channel
+from toolkit.EMA import ParameterEMA
 import copy
 
+import torch.nn.functional as F
 
 class ModelHelper:
     def __init__(self, model, optimizer, scheduler, criterion, multi_gpu=False, ema_beta=0.995, device="cuda", rank=0):
@@ -88,22 +86,14 @@ class ModelHelper:
         lr = torch.stack(lr_list).to(self.device)
         hr = torch.stack(hr_list).to(self.device)
 
-        with torch.no_grad():
-            if use_ema_model:
-                self.ema_model.eval()
-                model = self.ema_model
-            else:
-                self.model.eval()
-                model = self.model
-
-            hr_p = []
-            for i in range(random_sample):
-                hr_p.append(self.model_call(lr[i].unsqueeze(0), no_grad=True).squeeze(0))
-            hr_p = torch.stack(hr_p, dim=0)
+        hr_p = []
+        for i in range(random_sample):
+            hr_p.append(self.model_call(lr[i].unsqueeze(0), use_ema_model=use_ema_model, no_grad=True).squeeze(0))
+        hr_p = torch.stack(hr_p, dim=0)
 
         if save_img:
             if save_compare:
-                save_images_comparison2(hr_p, hr)
+                save_images_comparison(hr_p, hr)
             else:
                 save_images(hr_p)
         else:
@@ -173,7 +163,7 @@ class ModelHelper:
 
         return epoch_training_losses, ema_loss
 
-    def validation_loop(self, test_loader, e, epochs, ema_start_epoch):
+    def validation_loop(self, test_loader, e, epochs, ema_start_epoch, interp=False):
         epoch_validation_losses = []
         ssim = []
         psnr = []
@@ -182,10 +172,14 @@ class ModelHelper:
         with torch.no_grad():
             pbar = tqdm(test_loader, disable=(self.rank != 0), desc=f"Validating - Epoch {e + 1}/{epochs}", leave=True, dynamic_ncols=True)
             for i, (hr, lr) in enumerate(pbar):
-                loss, hr_p = self.predict(hr, lr, use_ema_model=e + 1 > ema_start_epoch or not self.new_ema)
-                epoch_validation_losses.append(loss.item())
-                ssim.append(calculate_ssim_pt(hr_p.float(), hr.to(self.device).float(), crop_border=5).mean().item())
-                psnr.append(calculate_psnr_pt(hr_p.float(), hr.to(self.device).float(), crop_border=5).mean().item())
+                if interp:
+                    hr_p = F.interpolate(lr.to(self.device), scale_factor=4, mode='bicubic')
+                else:
+                    loss, hr_p = self.predict(hr, lr, use_ema_model=e + 1 > ema_start_epoch or not self.new_ema)
+                    epoch_validation_losses.append(loss.item())
+
+                ssim.append(calculate_ssim_pt_y_channel(hr_p.float(), hr.to(self.device).float(), crop_border=3).mean().item())
+                psnr.append(calculate_psnr_pt_y_channel(hr_p.float(), hr.to(self.device).float(), crop_border=3).mean().item())
 
         return epoch_validation_losses, ssim, psnr
 

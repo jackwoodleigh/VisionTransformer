@@ -3,66 +3,24 @@ import random
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
-from tqdm import tqdm
 
-from ModelHelper import ModelHelper
-from utils import SuperResolutionDataset
+from toolkit.ModelHelper import ModelHelper
+from toolkit.utils import SuperResolutionDataset
 import yaml
 import warnings
-from utils import calculate_psnr, calculate_ssim
-import torchvision.transforms.functional as F
-from LossFunctions import Criterion
+from toolkit.LossFunctions import Criterion
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
+import torch.multiprocessing as mp
+from toolkit.Transforms import PadImg, CropDivisibleBy, random_rotate, rotate_if_wide
 
 # TODO compare conv upscaling and interpolation
 # TODO clean up the LMDB and data prep - possible multi threat extract better
 # TODO clean up main - look at transforms and maybe do with tensors
 # TODO figure issue with performance on multiple gpu
 # TODO Add data prep to config
-
-
-class PadImg:
-    def __init__(self, height, width):
-        self.final_width = width
-        self.final_height = height
-    def __call__(self, img):
-        w, h = img.size
-        pad_w = max(0, self.final_width - w)
-        pad_h = max(0, self.final_height - h)
-        padding = (pad_w // 2, pad_h // 2, pad_w - (pad_w // 2), pad_h - (pad_h // 2))
-        img = F.pad(img, padding, padding_mode='reflect')
-        return img
-def random_rotate(image):
-    angle = random.choice([0, 90, 180, 270])
-    return F.rotate(image, angle)
-
-def rotate_if_wide(img):
-    if img.height > img.width:
-        return img.rotate(-90, expand=True)
-    return img
-
-
-class CropDivisibleBy:
-    def __init__(self, divisor=4):
-        self.divisor = divisor
-    def __call__(self, img):
-        w, h = img.size
-        new_h = (h // self.divisor) * self.divisor
-        new_w = (w // self.divisor) * self.divisor
-        if new_h == 0:
-            new_h = self.divisor
-        if new_w == 0:
-            new_w = self.divisor
-        cropped_img = F.center_crop(img, (new_h, new_w))
-        return cropped_img
-
-    def __repr__(self):
-        return self.__class__.__name__ + f'(divisor={self.divisor})'
 
 def load_data(config, rank=0, multi_gpu=False):
 
@@ -117,8 +75,8 @@ def load_data(config, rank=0, multi_gpu=False):
         transform=transforms.Compose([
             rotate_if_wide,
             CropDivisibleBy(4),
-            #PadImg(512, 1024),
-            #transforms.RandomCrop((512, 1024)),
+            PadImg(512, 1024),
+            transforms.RandomCrop((512, 1024)),
             #transforms.RandomCrop(config["data"]["validation_image_size"]),
             transforms.ToTensor()])
         )
@@ -178,19 +136,6 @@ def initialize(config, rank=0, world_size=0):
         scale_factor=config["model"]["scale_factor"]
     )
 
-    '''from network_swinir import SwinIR
-    model = SwinIR(
-        img_size=64,
-        embed_dim=180,
-        window_size=8,
-        upsampler='nearest+conv',
-        upscale=4,
-        depths=[6, 6, 6, 6, 6, 6],
-        num_heads=[6, 6, 6, 6, 6, 6],
-        resi_connection="1conv",
-        img_range=4.0
-    )'''
-
     # Multi-GPU model
     model = model.to(f"cuda:{rank}")
     if multi_gpu:
@@ -220,7 +165,7 @@ def initialize(config, rank=0, world_size=0):
             load_optimizer=config["tools"]["load_optimizer"]
         )
 
-    # Loading Datasetz
+    # Loading Dataset
     train_dataset, test_dataset, train_loader, test_loader, sampler = load_data(config, rank, multi_gpu)
 
     return model, helper, (train_dataset, test_dataset, sampler, train_loader, test_loader)
@@ -259,10 +204,11 @@ def test(rank, config, world_size=0):
     model, helper, (train_dataset, test_dataset, sampler, train_loader, test_loader) = initialize(config, rank, world_size)
     #from LMDB import read_from_lmdb, get_keys
 
-    '''epoch_validation_losses, ssim, psnr = helper.validation_loop(test_loader, 10, 10, 20)
-    print(np.mean(ssim), np.mean(psnr))'''
+    epoch_validation_losses, ssim, psnr = helper.validation_loop(test_loader, 10, 10, 20, interp=False)
+    print(f"{np.mean(psnr):.4g} / {np.mean(ssim):.4g}")
 
-    test_dataset = SuperResolutionDataset(
+
+    '''test_dataset = SuperResolutionDataset(
         root=os.path.join(config["data"]["data_path"], config["data"]["testing_data_name"]),
         scale_values=config["model"]["scale_factor"],
         transform=transforms.Compose([
@@ -272,22 +218,21 @@ def test(rank, config, world_size=0):
             transforms.RandomCrop((512, 1024)),
             transforms.ToTensor()])
     )
-    helper.sample_model(random_sample=3, dataset=test_dataset, save_img=True, save_compare=True, use_ema_model=True)
-
+    helper.sample_model(random_sample=3, dataset=test_dataset, save_img=True, save_compare=True, use_ema_model=True)'''
 
 
 if __name__ == '__main__':
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file)
 
-    test(config=config, rank=0, world_size=0)
+    #test(config=config, rank=0, world_size=0)
 
-    '''# Training
+    # Training
     if config["tools"]["multi_gpu_enable"]:
         world_size = torch.cuda.device_count()
         mp.spawn(training, args=(config, world_size,), nprocs=world_size, join=True)
     else:
-        training(config=config, rank=0, world_size=0)'''
+        training(config=config, rank=0, world_size=0)
 
 
 

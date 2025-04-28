@@ -2,7 +2,6 @@ import io
 import os
 from os import path as osp
 
-import cv2
 import torch
 import torchvision
 from torch.utils.data import Dataset, Subset
@@ -15,6 +14,9 @@ from PIL import Image
 import numpy as np
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 import lmdb
+
+import kornia.color
+import cv2
 
 
 class SuperResolutionDataset(Dataset):
@@ -104,15 +106,7 @@ def denormalize_image(img, mean, std):
     img_denorm = torch.clamp(img_denorm, 0.0, 1.0)
     return img_denorm
 
-def save_images_comparison(hr_p, hr, filename="comparison.png", denorm=False):
-    if denorm:
-        hr_p = denormalize_image(hr_p, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
-        hr = denormalize_image(hr, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
-    comparison = torch.cat((hr, hr_p), dim=-1)
-    vutils.save_image(comparison, filename, nrow=hr.shape[0])
-    print("Saved Image Comparison.")
-
-def save_images_comparison2(hr_p, hr, filename="comparison.png", denorm=False, compare_bicubic=True):
+def save_images_comparison(hr_p, hr, filename="comparison.png", denorm=False, compare_bicubic=True):
     if denorm:
         hr_p = denormalize_image(hr_p, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
         hr = denormalize_image(hr, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
@@ -129,15 +123,11 @@ def save_images_comparison2(hr_p, hr, filename="comparison.png", denorm=False, c
     print("Saved Image Comparison.")
 
 
-def save_images(tensor, filename="images.png", denorm=False):
-    if denorm:
-        tensor = denormalize_image(tensor, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
+def save_images(tensor, filename="images.png"):
     vutils.save_image(tensor, filename, nrow=tensor.shape[0])
     print("Saved Images.")
 
-def tensor_to_pil(tensor, denorm=False):
-    if denorm:
-        tensor = denormalize_image(tensor, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
+def tensor_to_pil(tensor):
     to_pil = transforms.ToPILImage()
     return [to_pil(t) for t in tensor]
 
@@ -151,50 +141,6 @@ def create_image_grid(images, grid_size):
         grid_img.paste(img, (x, y))
     return grid_img
 
-def calculate_psnr(hr_p, hr, max_pixel_value=1.0, denorm=False):
-    if denorm:
-        hr_p = denormalize_image(hr_p, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
-        hr = denormalize_image(hr, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
-
-    mse = F.mse_loss(hr_p, hr, reduction="none")
-    mse = mse.mean(dim=(1, 2, 3))
-    psnr = 10 * torch.log10((max_pixel_value ** 2) / mse)
-    psnr[mse == 0] = float('inf')
-    return psnr
-
-def calculate_ssim(hr_p, hr, denorm=False):
-    if denorm:
-        hr_p = denormalize_image(hr_p, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
-        hr = denormalize_image(hr, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
-    ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(hr_p.device)
-    return ssim(hr_p, hr)
-
-def calculate_psnr_pt(img, img2, crop_border):
-
-    assert img.shape == img2.shape, (f'Image shapes are different: {img.shape}, {img2.shape}.')
-
-    if crop_border != 0:
-        img = img[:, :, crop_border:-crop_border, crop_border:-crop_border]
-        img2 = img2[:, :, crop_border:-crop_border, crop_border:-crop_border]
-
-    img = img.to(torch.float64)
-    img2 = img2.to(torch.float64)
-
-    mse = torch.mean((img - img2)**2, dim=[1, 2, 3])
-    return 10. * torch.log10(1. / (mse + 1e-8))
-
-def calculate_ssim_pt(img, img2, crop_border):
-    assert img.shape == img2.shape, (f'Image shapes are different: {img.shape}, {img2.shape}.')
-    if crop_border != 0:
-        img = img[:, :, crop_border:-crop_border, crop_border:-crop_border]
-        img2 = img2[:, :, crop_border:-crop_border, crop_border:-crop_border]
-
-    img = img.to(torch.float64)
-    img2 = img2.to(torch.float64)
-
-    ssim = _ssim_pth(img * 255., img2 * 255.)
-    return ssim
-
 def _ssim_pth(img, img2):
     c1 = (0.01 * 255)**2
     c2 = (0.03 * 255)**2
@@ -203,8 +149,8 @@ def _ssim_pth(img, img2):
     window = np.outer(kernel, kernel.transpose())
     window = torch.from_numpy(window).view(1, 1, 11, 11).expand(img.size(1), 1, 11, 11).to(img.dtype).to(img.device)
 
-    mu1 = F.conv2d(img, window, stride=1, padding=0, groups=img.shape[1])  # valid mode
-    mu2 = F.conv2d(img2, window, stride=1, padding=0, groups=img2.shape[1])  # valid mode
+    mu1 = F.conv2d(img, window, stride=1, padding=0, groups=img.shape[1])
+    mu2 = F.conv2d(img2, window, stride=1, padding=0, groups=img2.shape[1])
     mu1_sq = mu1.pow(2)
     mu2_sq = mu2.pow(2)
     mu1_mu2 = mu1 * mu2
@@ -215,6 +161,60 @@ def _ssim_pth(img, img2):
     cs_map = (2 * sigma12 + c2) / (sigma1_sq + sigma2_sq + c2)
     ssim_map = ((2 * mu1_mu2 + c1) / (mu1_sq + mu2_sq + c1)) * cs_map
     return ssim_map.mean([1, 2, 3])
+
+
+def calculate_psnr_pt_y_channel(img_rgb, img2_rgb, crop_border, test_y_channel=True):
+    assert img_rgb.shape == img2_rgb.shape, (f'Image shapes are different: {img_rgb.shape}, {img2_rgb.shape}.')
+    assert img_rgb.dim() == 4 and img_rgb.shape[1] == 3, f'Input should be Bx3xHxW, got {img_rgb.shape}'
+
+    if crop_border != 0:
+        img_rgb = img_rgb[:, :, crop_border:-crop_border, crop_border:-crop_border]
+        img2_rgb = img2_rgb[:, :, crop_border:-crop_border, crop_border:-crop_border]
+
+    if test_y_channel:
+        img_y = kornia.color.rgb_to_ycbcr(img_rgb)[:, 0:1, :, :]
+        img2_y = kornia.color.rgb_to_ycbcr(img2_rgb)[:, 0:1, :, :]
+        img = img_y
+        img2 = img2_y
+        max_val = 1.0
+    else:
+        img = img_rgb
+        img2 = img2_rgb
+        max_val = 1.0
+
+    img = img.to(torch.float64)
+    img2 = img2.to(torch.float64)
+
+    mse = torch.mean((img - img2)**2, dim=[1, 2, 3])
+
+    psnr = 10. * torch.log10(max_val**2 / (mse + 1e-10))
+
+    return torch.clamp(psnr, min=0, max=100.)
+
+def calculate_ssim_pt_y_channel(img_rgb, img2_rgb, crop_border, test_y_channel=True):
+
+    assert img_rgb.shape == img2_rgb.shape, (f'Image shapes are different: {img_rgb.shape}, {img2_rgb.shape}.')
+    assert img_rgb.dim() == 4 and img_rgb.shape[1] == 3, f'Input should be Bx3xHxW, got {img_rgb.shape}'
+
+    if crop_border != 0:
+        img_rgb = img_rgb[:, :, crop_border:-crop_border, crop_border:-crop_border]
+        img2_rgb = img2_rgb[:, :, crop_border:-crop_border, crop_border:-crop_border]
+
+    if test_y_channel:
+        img_y = kornia.color.rgb_to_ycbcr(img_rgb)[:, 0:1, :, :]
+        img2_y = kornia.color.rgb_to_ycbcr(img2_rgb)[:, 0:1, :, :]
+        img = img_y
+        img2 = img2_y
+    else:
+        img = img_rgb
+        img2 = img2_rgb
+
+    img = img.to(torch.float64)
+    img2 = img2.to(torch.float64)
+
+    ssim_val = _ssim_pth(img * 255., img2 * 255.)
+    return ssim_val
+
 
 def scandir(dir_path, suffix=None, recursive=False, full_path=False):
     if (suffix is not None) and not isinstance(suffix, (str, tuple)):

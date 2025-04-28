@@ -78,8 +78,12 @@ def worker(path, opt):
 
 
 if __name__ == '__main__':
-    with open('config.yaml', 'r') as file:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, '..', 'config.yaml')
+    config_path = os.path.abspath(config_path)
+    with open(config_path, 'r') as file:
         config = yaml.safe_load(file)
+        print("Config loaded successfully.")
 
     path = os.path.join(config["data"]["data_path"], config["data"]["training_data_name"])
 

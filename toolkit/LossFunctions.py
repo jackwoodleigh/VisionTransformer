@@ -1,9 +1,8 @@
-import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
 import torchvision.models as models
-from utils import denormalize_image
+from toolkit.utils import denormalize_image
 
 
 class PerceptualLoss(nn.Module):
