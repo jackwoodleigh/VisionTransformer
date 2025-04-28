@@ -8,6 +8,8 @@ In this project, we create a novel vision transformer architecture designed to p
 ![arch](https://github.com/jackwoodleigh/VisionTransformer/blob/main/Group%201.png)
 
 ### Results so far...
+
+#### Ground Truth / Bicubic / Ours
 ![sample](https://github.com/jackwoodleigh/VisionTransformer/blob/main/comparisonzoom.png)
 
 #### Image Quality (PSNR / SSIM)
