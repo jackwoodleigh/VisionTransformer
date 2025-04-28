@@ -127,8 +127,8 @@ class MSFBlock_3(nn.Module):
         self.levels = levels
         level_dim = dim // 2
 
-        self.in_ds = nn.Conv2d(dim, level_dim, 1, 1)
-        self.ds = nn.ModuleList([nn.Conv2d(level_dim // (4 ** i), level_dim // (4 ** (i + 1)), 1, 1) for i in range(levels - 1)])
+        self.init_ds = nn.Conv2d(dim, level_dim, 1, 1)
+        self.level_ds = nn.ModuleList([nn.Conv2d(level_dim // (4 ** i), level_dim // (4 ** (i + 1)), 1, 1) for i in range(levels - 1)])
 
         self.level_layer = nn.ModuleList([
             nn.Sequential(
@@ -139,7 +139,7 @@ class MSFBlock_3(nn.Module):
         ])
 
         total_level_dim = sum([level_dim // (4 ** i) for i in range(1, levels)])
-        self.post_level_fuse = nn.Conv2d(total_level_dim, total_level_dim, 1, 1)
+        self.post_level_fuse = nn.Conv2d(total_level_dim, total_level_dim, 3, 1, 1)
         self.fuse = nn.Sequential(
             ViTBlock(window_size, dim + total_level_dim, n_heads=n_heads_fuse, ffn_scale=ffn_scale, drop_path=drop_path),
             nn.Conv2d(dim + total_level_dim, dim, 1, 1),
@@ -149,13 +149,50 @@ class MSFBlock_3(nn.Module):
 
     def forward(self, x):
         maps = []
-        z = self.in_ds(x)
+        z = self.init_ds(x)
         for i in range(self.levels - 1):
-            z = self.ds[i](z)
+            z = self.level_ds[i](z)
             maps.append(self.level_layer[i](z))
 
         levels = self.post_level_fuse(torch.cat(maps, dim=1))
         return self.rezero * self.fuse(torch.cat([x, levels], dim=1)) + x
+
+
+class MSFBlock_4(nn.Module):
+    def __init__(self, levels, window_size, dim, level_dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.0):
+        super().__init__()
+        self.levels = levels
+        level_dim = dim // 2
+
+        self.each_level_dims = [level_dim // 4 ** i for i in range(1, levels)]
+        total_level_dim = sum(self.each_level_dims)
+        self.ds = nn.Conv2d(dim, total_level_dim, 1, 1)
+
+        self.level_layer = nn.ModuleList([
+            nn.Sequential(
+                nn.PixelUnshuffle(2 ** i),
+                ViTBlock(window_size, level_dim, n_heads=n_heads, ffn_scale=ffn_scale, drop_path=drop_path),
+                nn.PixelShuffle(2 ** i)
+            ) for i in range(1, levels)
+        ])
+
+        self.post_level_fuse = nn.Conv2d(total_level_dim, total_level_dim, 3, 1, 1)
+        self.fuse = nn.Sequential(
+            ViTBlock(window_size, dim + total_level_dim, n_heads=n_heads_fuse, ffn_scale=ffn_scale, drop_path=drop_path),
+            nn.Conv2d(dim + total_level_dim, dim, 1, 1),
+        )
+
+        self.rezero = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        z = self.ds(x)
+        z_maps = list(z.split(self.each_level_dims, dim=1))
+
+        for i in range(self.levels - 1):
+            z_maps[i] = self.level_layer[i](z_maps[i])
+
+        level_context = self.post_level_fuse(torch.cat(z_maps, dim=1))
+        return self.rezero * self.fuse(torch.cat([x, level_context], dim=1)) + x
 
 class DenseResidualBlock(nn.Module):
     def __init__(self, n_sub_blocks, levels, window_size, dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.0):
@@ -203,7 +240,7 @@ class DenseResidualBlock(nn.Module):
 class ResidualBlock(nn.Module):
     def __init__(self, n_sub_blocks, levels, window_size, dim, level_dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.):
         super().__init__()
-        self.layers = nn.Sequential(*[MSFBlock_3(
+        self.layers = nn.Sequential(*[MSFBlock_4(
             levels=levels,
             level_dim=level_dim,
             dim=dim,
@@ -343,19 +380,30 @@ class LMLTransformer(nn.Module):
 
 
 if __name__ == '__main__':
-    torch.set_float32_matmul_precision('high')
-    print(torch.cuda.is_available())
+    import yaml
+    import torch
+    from fvcore.nn import parameter_count_table, FlopCountAnalysis
 
-    x = torch.randn(8, 3, 480, 270, requires_grad=True).to("cuda")  # 1920x1080 output
-    model = LMLTransformer(n_blocks=12, levels=4, dim=84, window_size=8, scale_factor=4)
-    print(f'params: {sum(map(lambda x: x.numel(), model.parameters()))}')
+    with open('config.yaml', 'r') as file:
+        config = yaml.safe_load(file)
 
-    model = model.to('cuda')
-    #output = model(x)
-    output = checkpoint(model, x, use_reentrant=True)
-    print(output.shape)
+    model = LMLTransformer(
+        block_type=config["model"]["block_type"],
+        n_blocks=config["model"]["n_blocks"],
+        n_sub_blocks=config["model"]["n_sub_blocks"],
+        levels=config["model"]["levels"],
+        window_size=config["model"]["window_size"],
+        dim=config["model"]["dim"],
+        level_dim=config["model"]["level_dim"],
+        n_heads=config["model"]["n_heads"],
+        n_heads_fuse=config["model"]["n_heads_fuse"],
+        feature_dim=config["model"]["feature_dim"],
+        scale_factor=config["model"]["scale_factor"]
+    )
 
-#vit = VisionTransformer(4, 4, 3, 32, 32)
-# t = Transformer(4)
-#x = torch.randn(1, 3, 32, 32)
-#print(vit(x).shape)
+    print(parameter_count_table(model))
+
+    tensor = torch.randn(1, 3, 64, 64)
+    flop_count = FlopCountAnalysis(model, tensor)
+    flops = flop_count.total()
+    print(flops)
