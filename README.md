@@ -1,4 +1,4 @@
-## This project is still ongoing but here are some visual details. More to come soon.
+## This project is still ongoing but here are some details as it progresses. This is relavent to ~4/15/2025
 
 ### Abstract 
 
