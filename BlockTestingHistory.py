@@ -308,7 +308,7 @@ class MSFBlock_3(nn.Module):
         return self.rezero * self.fuse(torch.cat([x, levels], dim=1)) + x
 
 
-# parallel down sampling resulting in minimal convolutional parameter reduction
+# parallel down sampling minimal convolutional parameter reduction and new merging
 class MSFBlock_4(nn.Module):
     def __init__(self, levels, window_size, dim, level_dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.0):
         super().__init__()
@@ -319,11 +319,19 @@ class MSFBlock_4(nn.Module):
         total_level_dim = sum(self.each_level_dims)
         self.ds = nn.Conv2d(dim, total_level_dim, 1, 1)
 
-        self.level_layer = nn.ModuleList([
+        '''self.level_layer = nn.ModuleList([
             nn.Sequential(
                 nn.PixelUnshuffle(2 ** i),
                 ViTBlock(window_size, level_dim, n_heads=n_heads, ffn_scale=ffn_scale, drop_path=drop_path),
                 nn.PixelShuffle(2 ** i)
+            ) for i in range(1, levels)
+        ])'''
+
+        self.level_layer = nn.ModuleList([
+            nn.Sequential(
+                PatchMerging(level_dim, 2 ** i),
+                ViTBlock(window_size, level_dim, n_heads=n_heads, ffn_scale=ffn_scale, drop_path=drop_path),
+                PatchUnMerging(level_dim, 2 ** i)
             ) for i in range(1, levels)
         ])
 

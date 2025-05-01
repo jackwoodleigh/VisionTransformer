@@ -6,7 +6,7 @@ import torch
 from torchvision import transforms
 
 from toolkit.ModelHelper import ModelHelper
-from toolkit.utils import SuperResolutionDataset
+from toolkit.Dataset import SuperResolutionDataset
 import yaml
 import warnings
 from toolkit.LossFunctions import Criterion
@@ -21,6 +21,14 @@ from toolkit.Transforms import PadImg, CropDivisibleBy, random_rotate, rotate_if
 # TODO clean up main - look at transforms and maybe do with tensors
 # TODO figure issue with performance on multiple gpu
 # TODO Add data prep to config
+
+# TODO Test MLP ratios
+# TODO Test window sizes
+
+# TODO Cuda prefetch?
+# TODO save paired images that are downscaled then do paired random crop
+# do downscale when 0-255
+
 
 def load_data(config, rank=0, multi_gpu=False):
 

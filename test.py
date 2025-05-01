@@ -1,28 +1,26 @@
-import yaml
+
 import torch
-from fvcore.nn import parameter_count_table, FlopCountAnalysis
-from MSFT_Arch import LMLTransformer
+from torch import nn
 
-with open('config.yaml', 'r') as file:
-    config = yaml.safe_load(file)
+t = torch.tensor(range(64)).view(1, 1, 8, 8)
+print(t.shape)
+print(t)
 
-model = LMLTransformer(
-        block_type=config["model"]["block_type"],
-        n_blocks=config["model"]["n_blocks"],
-        n_sub_blocks=config["model"]["n_sub_blocks"],
-        levels=config["model"]["levels"],
-        window_size=config["model"]["window_size"],
-        dim=config["model"]["dim"],
-        level_dim=config["model"]["level_dim"],
-        n_heads=config["model"]["n_heads"],
-        n_heads_fuse=config["model"]["n_heads_fuse"],
-        feature_dim=config["model"]["feature_dim"],
-        scale_factor=config["model"]["scale_factor"]
-)
+print("====================================")
 
-print(parameter_count_table(model))
+pixel = nn.PixelUnshuffle(2)
+t2 = pixel(t)
+print(t2.shape)
 
-tensor = torch.randn(1,3,64,64)
-flop_count = FlopCountAnalysis(model, tensor)
-flops = flop_count.total()
-print(flops)
+print(t2[0][0])
+
+print("====================================")
+x = t.permute(0, 2, 3, 1)
+x0 = x[:, 0::2, 0::2, :]
+x1 = x[:, 1::2, 0::2, :]
+x2 = x[:, 0::2, 1::2, :]
+x3 = x[:, 1::2, 1::2, :]
+t3 = torch.cat([x0, x1, x2, x3], -1)
+print(t3.shape)
+
+print(t3.permute(0, 3, 1, 2)[0][0])

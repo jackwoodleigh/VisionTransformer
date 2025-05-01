@@ -12,6 +12,27 @@ from tqdm import tqdm
 
 # Code from https://github.com/jwgdmkj/LMLT/blob/main/scripts/data_preparation
 
+
+def get_keys(lmdb_path):
+    env = lmdb.open(lmdb_path, readonly=True, lock=False)
+    with env.begin() as txn:
+        total_images = int(txn.get(b'__len__').decode('utf-8'))
+        keys = {i: f"{i:08d}" for i in range(total_images)}
+    env.close()
+    return keys
+
+def read_from_lmdb(lmdb_path, key):
+    env = lmdb.open(lmdb_path, readonly=True, lock=False)
+    with env.begin() as txn:
+        data = txn.get(key.encode('ascii'))
+        if data is None:
+            print("Key not found!")
+            return None
+        img_array = np.frombuffer(data, dtype=np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_UNCHANGED)
+    env.close()
+    return img
+
 def create_lmdb(folder_path, lmdb_path):
     img_path_list, keys = prepare_keys(folder_path)
     make_lmdb_from_imgs(folder_path, lmdb_path, img_path_list, keys, map_size=60 * 1024 * 1024 * 1024)

@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.nn.modules.module import T
 from torch.utils.checkpoint import checkpoint
 
 # https://arxiv.org/pdf/2409.03516
@@ -31,6 +32,49 @@ class MLP(nn.Module):
         x = self.mlp(x)
         return x
 
+# input/output B, C, H, W
+class PatchMerging(nn.Module):
+    def __init__(self, dim, scale):
+        super().__init__()
+        self.pixel_unshuffle = nn.PixelUnshuffle(scale)
+        self.norm = nn.LayerNorm(dim)
+        self.linear = nn.Linear(dim, dim, bias=False)
+
+    def forward(self, x):
+        x = self.pixel_unshuffle(x)
+
+        # B, C, H, W -> B, H, W, C
+        x = x.permute(0, 2, 3, 1).contiguous()
+
+        x = self.norm(x)
+        x = self.linear(x)
+
+        # B, H, W, C -> B, C, H, W
+        x = x.permute(0, 3, 1, 2).contiguous()
+
+        return x
+
+# input/output B, C, H, W
+class PatchUnMerging(nn.Module):
+    def __init__(self, dim, scale):
+        super().__init__()
+        self.pixel_shuffle = nn.PixelShuffle(scale)
+        self.norm = nn.LayerNorm(dim)
+        self.linear = nn.Linear(dim, dim, bias=False)
+
+    def forward(self, x):
+        # B, C, H, W -> B, H, W, C
+        x = x.permute(0, 2, 3, 1).contiguous()
+
+        x = self.norm(x)
+        x = self.linear(x)
+
+        # B, H, W, C -> B, C, H, W
+        x = x.permute(0, 3, 1, 2).contiguous()
+
+        x = self.pixel_shuffle(x)
+
+        return x
 
 class WindowedMSA(nn.Module):
     def __init__(self, window_size, dim, num_heads=4, attn_drop=0., proj_drop=0.):
@@ -107,7 +151,7 @@ class ViTBlock(nn.Module):
         self.ln2 = nn.LayerNorm(dim)
         self.drop_path = nn.Dropout(drop_path)
 
-    # Input/Output B,C,H,W
+    # Needs to work with B, H, W, C
     def forward(self, x):
         B, C, H, W = x.shape
 
@@ -170,9 +214,9 @@ class MSFBlock_4(nn.Module):
 
         self.level_layer = nn.ModuleList([
             nn.Sequential(
-                nn.PixelUnshuffle(2 ** i),
+                PatchMerging(dim=level_dim, scale=2 ** i),
                 ViTBlock(window_size, level_dim, n_heads=n_heads, ffn_scale=ffn_scale, drop_path=drop_path),
-                nn.PixelShuffle(2 ** i)
+                PatchUnMerging(dim=level_dim, scale=2 ** i)
             ) for i in range(1, levels)
         ])
 
@@ -193,6 +237,24 @@ class MSFBlock_4(nn.Module):
 
         level_context = self.post_level_fuse(torch.cat(z_maps, dim=1))
         return self.rezero * self.fuse(torch.cat([x, level_context], dim=1)) + x
+
+class ResidualBlock(nn.Module):
+    def __init__(self, n_sub_blocks, levels, window_size, dim, level_dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.):
+        super().__init__()
+        self.layers = nn.Sequential(*[MSFBlock_4(
+            levels=levels,
+            level_dim=level_dim,
+            dim=dim,
+            window_size=window_size,
+            n_heads=n_heads,
+            n_heads_fuse=n_heads_fuse,
+            ffn_scale=ffn_scale,
+            drop_path=drop_path) for _ in range(n_sub_blocks)])
+
+        self.out_layer = nn.Conv2d(dim, dim, 3, 1, 1)
+
+    def forward(self, x):
+        return self.out_layer(self.layers(x)) + x
 
 class DenseResidualBlock(nn.Module):
     def __init__(self, n_sub_blocks, levels, window_size, dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.0):
@@ -236,24 +298,6 @@ class DenseResidualBlock(nn.Module):
 
         return self.out_layer(x)
 
-
-class ResidualBlock(nn.Module):
-    def __init__(self, n_sub_blocks, levels, window_size, dim, level_dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.):
-        super().__init__()
-        self.layers = nn.Sequential(*[MSFBlock_4(
-            levels=levels,
-            level_dim=level_dim,
-            dim=dim,
-            window_size=window_size,
-            n_heads=n_heads,
-            n_heads_fuse=n_heads_fuse,
-            ffn_scale=ffn_scale,
-            drop_path=drop_path) for _ in range(n_sub_blocks)])
-
-        self.out_layer = nn.Conv2d(dim, dim, 3, 1, 1)
-
-    def forward(self, x):
-        return self.out_layer(self.layers(x)) + x
 
 class MSFTransformer(nn.Module):
     def __init__(
@@ -387,7 +431,7 @@ if __name__ == '__main__':
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file)
 
-    model = LMLTransformer(
+    model = MSFTransformer(
         block_type=config["model"]["block_type"],
         n_blocks=config["model"]["n_blocks"],
         n_sub_blocks=config["model"]["n_sub_blocks"],
@@ -407,3 +451,7 @@ if __name__ == '__main__':
     flop_count = FlopCountAnalysis(model, tensor)
     flops = flop_count.total()
     print(flops)
+
+
+class LMLTransformer:
+    pass
