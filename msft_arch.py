@@ -405,7 +405,6 @@ class MSFTransformer(nn.Module):
 
     # 1, 3, 16, 16 = x
     def forward(self, x):
-        x = (x - 0.5) / 0.25
         B, C, H, W = x.shape
 
         x = self.padding(x)
@@ -415,9 +414,6 @@ class MSFTransformer(nn.Module):
         x = self.feature_transition(self.layers(x)) + x
 
         x = self.img_reconstruction(x)
-
-        x = x * 0.25 + 0.5
-        x = torch.clamp(x, min=0, max=1.0)
 
         # crop padding
         return x[:, :, :H*self.scale_factor, :W*self.scale_factor]
@@ -452,6 +448,3 @@ if __name__ == '__main__':
     flops = flop_count.total()
     print(flops)
 
-
-class LMLTransformer:
-    pass

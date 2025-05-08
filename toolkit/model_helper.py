@@ -10,7 +10,7 @@ from torch.utils.checkpoint import checkpoint
 from torch.amp import autocast, GradScaler
 #from torch.cuda.amp import autocast, GradScaler
 from toolkit.utils import save_images_comparison, save_images, tensor_to_pil, create_image_grid, infinite_dataloader, calculate_psnr_pt_y_channel, calculate_ssim_pt_y_channel
-from toolkit.EMA import ParameterEMA
+from toolkit.param_ema import ParameterEMA
 import copy
 
 import torch.nn.functional as F

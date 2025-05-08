@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from MSFT_Arch import ViTBlock
+from msft_arch import ViTBlock
 
 
 class LHSABlock_1(nn.Module):

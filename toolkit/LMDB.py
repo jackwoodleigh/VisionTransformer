@@ -1,3 +1,4 @@
+
 import sys
 from multiprocessing import Pool
 
@@ -158,4 +159,3 @@ def img2tensor(imgs, bgr2rgb=True, float32=True):
         return [_totensor(img, bgr2rgb, float32) for img in imgs]
     else:
         return _totensor(imgs, bgr2rgb, float32)
-

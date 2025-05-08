@@ -19,18 +19,8 @@ import kornia.color
 import cv2
 
 
-def denormalize_image(img, mean, std):
-    device = img.device
-    mean = torch.tensor(mean, device=device).view(-1, 1, 1)
-    std = torch.tensor(std, device=device).view(-1, 1, 1)
-    img_denorm = img * std + mean
-    img_denorm = torch.clamp(img_denorm, 0.0, 1.0)
-    return img_denorm
 
-def save_images_comparison(hr_p, hr, filename="comparison.png", denorm=False, compare_bicubic=True):
-    if denorm:
-        hr_p = denormalize_image(hr_p, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
-        hr = denormalize_image(hr, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
+def save_images_comparison(hr_p, hr, filename="comparison.png", compare_bicubic=True):
     imgs = [hr]
     if compare_bicubic:
         lr = F.interpolate(hr, scale_factor=(1 / 4), mode='bicubic')

@@ -5,16 +5,16 @@ import numpy as np
 import torch
 from torchvision import transforms
 
-from toolkit.ModelHelper import ModelHelper
+from toolkit.model_helper import ModelHelper
 from toolkit.Dataset import SuperResolutionDataset
 import yaml
 import warnings
-from toolkit.LossFunctions import Criterion
+from toolkit.loss_functions import Criterion
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 import torch.multiprocessing as mp
-from toolkit.Transforms import PadImg, CropDivisibleBy, random_rotate, rotate_if_wide
+from toolkit.transforms import PadImg, CropDivisibleBy, random_rotate, rotate_if_wide
 
 # TODO compare conv upscaling and interpolation
 # TODO clean up the LMDB and data prep - possible multi threat extract better
@@ -45,7 +45,7 @@ def load_data(config, rank=0, multi_gpu=False):
             if os.path.exists(path + "_sub"):
                 print("Using Sub-Images.")
             else:
-                raise Exception("Sub-images directory not found. Run DatasetPreparation.py")
+                raise Exception("Sub-images directory not found. Run data_prep.py")
         path += "_sub"
 
     # Validating LMDB
@@ -54,7 +54,7 @@ def load_data(config, rank=0, multi_gpu=False):
             if os.path.exists(path + "_lmdb"):
                 print(f"LMDB Enabled.")
             else:
-                raise Exception("LMDB directory not found. Run DatasetPreparation.py")
+                raise Exception("LMDB directory not found. Run data_prep.py")
         path += "_lmdb"
 
     torch.cuda.synchronize()
@@ -129,7 +129,7 @@ def initialize(config, rank=0, world_size=0):
         dist.init_process_group(backend='gloo', init_method="tcp://127.0.0.1:29500?use_libuv=0", rank=rank, world_size=world_size)
         torch.cuda.set_device(rank)
 
-    from MSFT_Arch import MSFTransformer
+    from msft_arch import MSFTransformer
     model = MSFTransformer(
         block_type=config["model"]["block_type"],
         n_blocks=config["model"]["n_blocks"],

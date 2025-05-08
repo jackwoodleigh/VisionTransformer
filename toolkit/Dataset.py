@@ -1,4 +1,5 @@
 
+
 import io
 import os
 from os import path as osp
@@ -98,5 +99,3 @@ def infinite_dataloader(dataloader):
     while True:
         for batch in dataloader:
             yield batch
-
-

@@ -1,8 +1,8 @@
-gdown
-tqdm
-wandb
 torchmetrics
 opencv-python
 lmdb
+tqdm
+wandb
 timm
 kornia
+gdown

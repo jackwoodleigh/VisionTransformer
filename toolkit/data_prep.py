@@ -1,12 +1,8 @@
 import os
-import sys
-
 import cv2
 import numpy as np
 from tqdm import tqdm
-import lmdb
 import yaml
-from PIL import Image
 from os import path as osp
 from multiprocessing import Pool
 from utils import scandir
@@ -14,10 +10,10 @@ from LMDB import create_lmdb
 
 # Code from https://github.com/jwgdmkj/LMLT/blob/main/scripts/data_preparation
 
-def rename_subimages(folder_path):
+def img_folder_rename(folder_path):
     img_list = list(scandir(folder_path, recursive=True, full_path=False))
     for idx, original_name in enumerate(tqdm(img_list, unit='image', desc='Ordering Directory.')):
-        new_name = f"{idx:08d}.png"
+        new_name = f"img_{idx:08d}.png"
         src = osp.join(folder_path, original_name)
         dst = osp.join(folder_path, new_name)
         os.rename(src, dst)
@@ -41,7 +37,7 @@ def extract_subimages(opt):
     pool.close()
     pool.join()
     pbar.close()
-    rename_subimages(save_folder)
+    img_folder_rename(save_folder)
     print('All processes done.')
 
 
@@ -79,8 +75,9 @@ def worker(path, opt):
 
 if __name__ == '__main__':
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(script_dir, '..', 'config.yaml')
+    config_path = os.path.join(script_dir, '..', 'configs', 'config.yaml')
     config_path = os.path.abspath(config_path)
+
     with open(config_path, 'r') as file:
         config = yaml.safe_load(file)
         print("Config loaded successfully.")
@@ -88,15 +85,15 @@ if __name__ == '__main__':
     path = os.path.join(config["data"]["data_path"], config["data"]["training_data_name"])
 
     if config["tools"]["use_sub_images"]:
-        #process_to_sub_images(path, path + "_sub", config["tools"]["sub_img_col"], config["tools"]["sub_img_row"])
-        opt = {}
-        opt['n_thread'] = 20
-        opt['compression_level'] = 3
-        opt['input_folder'] = path
-        opt['save_folder'] = path + "_sub"
-        opt['crop_size'] = 480
-        opt['step'] = 240
-        opt['thresh_size'] = 10
+        opt = {
+            'n_thread': 20,
+            'compression_level': 3,
+            'input_folder': path,
+            'save_folder': path + "_sub",
+            'crop_size': 480,
+            'step': 240,
+            'thresh_size': 10
+        }
         extract_subimages(opt)
         path += "_sub"
 
