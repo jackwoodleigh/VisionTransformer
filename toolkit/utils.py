@@ -18,8 +18,6 @@ import lmdb
 import kornia.color
 import cv2
 
-
-
 def save_images_comparison(hr_p, hr, filename="comparison.png", compare_bicubic=True):
     imgs = [hr]
     if compare_bicubic:
@@ -151,6 +149,33 @@ def scandir(dir_path, suffix=None, recursive=False, full_path=False):
                     continue
 
     return _scandir(dir_path, suffix=suffix, recursive=recursive)
+
+def format_image_files(data_root, flatten=False):
+    img_list = list(scandir(data_root, recursive=True, full_path=True))
+    sub_directories = set()
+    supported_extensions = ['.png', '.jpeg', '.jpg']
+    for idx, src in enumerate(img_list):
+        extension = osp.splitext(src)[1]
+        if extension not in supported_extensions:
+            raise Exception(f"Found unsupported file extension at {src}")
+        new_name = f"img_{idx:08d}{extension}"
+        if osp.dirname(src) != data_root and osp.dirname(src) not in sub_directories:
+            sub_directories.add(osp.dirname(src))
+
+        if not flatten and data_root != osp.dirname(src):
+            dst = osp.join(osp.dirname(src), new_name)
+        else:
+            dst = osp.join(data_root, new_name)
+        os.rename(src, dst)
+
+    if flatten:
+        for dir in sub_directories:
+            if not os.listdir(dir):
+                os.rmdir(dir)
+            else:
+                raise Exception(f"Failed to delete {dir} when flattening. It is not empty.")
+
+
 
 
 

@@ -1,4 +1,5 @@
 model:
+  scale_factor: 4
   block_type: "default"
   n_blocks: 6
   n_sub_blocks: 6
@@ -9,41 +10,53 @@ model:
   n_heads_fuse: 4
   feature_dim: 64
   window_size: 8
-  scale_factor: 4
+
 
 training:
   learning_rate: 0.00015
-  iterations: 500000
-  epochs: 100
-  batch_size_per_gpu: 4
+  batch_size_per_gpu: 2
   accumulation_steps: 1
+  iterations: 5000
+  epochs: 100
   model_ema: 0.999
   ema_start_epoch: 2
   criterion:
     L1: 1.0
     #FFTLoss: 0.05
 
-data:
-  data_path: "data"
-  training_data_name: "train"
-  testing_data_name: "test"
-  data_subset: 0
-  training_dataset_enlarge_scale: 1
-  training_image_size: 256
-  validation_image_size: 512
-  transform_data: True
+dataset:
+  data_root: "data"
   num_dataloader_workers: 12
 
+  training:
+    file_name: "train"
+    use_sub_images: True
+    paired_images: True
+    random_rot: True
+    random_flip: True
+    data_subset_size: 0
+    dataset_enlarge_scale: 1
+    crop_size: 256
+
+  validation:
+    file_name: "test"
+    data_subset_size: 0
+    crop_size: 512
+
 tools:
+  file_backend_type: "Disk"
+  prefetching_dataloader: False
+  multi_gpu_enable: False
+  pretrained_weights_path: ""
+  load_optimizer: True
+  benchmark: True
+  deterministic: False
+
+logging:
   wandb_log: False
-  logging_path: "Logs"
+  path: "Logs"
   save_model_every_i_epoch: 1
   model_save_name: ""
-  load_model_save_name: ""
-  load_optimizer: True
-  multi_gpu_enable: False
-  use_lmdb: True
-  use_sub_images: True
   sub_img_col: 4
   sum_img_row: 2
 

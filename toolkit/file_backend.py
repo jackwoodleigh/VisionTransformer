@@ -4,13 +4,16 @@ import lmdb
 import numpy as np
 
 def bytes_to_rgb(x):
-    return cv2.cvtColor(cv2.imdecode(np.frombuffer(x, dtype=np.uint8), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB).astype(np.float32) / 255.
+    return (cv2.imdecode(np.frombuffer(x, dtype=np.uint8), cv2.IMREAD_COLOR)[..., ::-1].astype(np.float32) / 255.).transpose(2, 0, 1)
 
 class FileBackend:
     def __init__(self, backend_type, root):
         self.backend_type = backend_type
         self.root = root
-        if backend_type == "LMDB":
+        self.env = None
+
+    def load_from_LMDB(self, img_name):
+        if self.env is None:
             self.env = lmdb.open(
                 self.root,
                 readonly=True,
@@ -18,11 +21,9 @@ class FileBackend:
                 readahead=False,
                 meminit=False
             )
-
-    def load_from_LMDB(self, img_name):
         key = os.path.splitext(img_name)[0]
         key = str(key).encode('utf-8')
-        with self.env.begin() as txn:
+        with self.env.begin(write=False) as txn:
             img_bytes = txn.get(key)
             if img_bytes is None:
                 raise KeyError(f"Key {key} not found in LMDB!")

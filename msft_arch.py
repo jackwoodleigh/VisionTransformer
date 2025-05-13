@@ -181,6 +181,13 @@ class MSFBlock_3(nn.Module):
                 nn.PixelShuffle(2 ** i)
             ) for i in range(1, levels)
         ])
+        '''self.level_layer = nn.ModuleList([
+            nn.Sequential(
+                PatchMerging(dim=level_dim, scale=2 ** i),
+                ViTBlock(window_size, level_dim, n_heads=n_heads, ffn_scale=ffn_scale, drop_path=drop_path),
+                PatchUnMerging(dim=level_dim, scale=2 ** i)
+            ) for i in range(1, levels)
+        ])'''
 
         total_level_dim = sum([level_dim // (4 ** i) for i in range(1, levels)])
         self.post_level_fuse = nn.Conv2d(total_level_dim, total_level_dim, 3, 1, 1)
@@ -212,6 +219,14 @@ class MSFBlock_4(nn.Module):
         total_level_dim = sum(self.each_level_dims)
         self.ds = nn.Conv2d(dim, total_level_dim, 1, 1)
 
+        '''self.level_layer = nn.ModuleList([
+            nn.Sequential(
+                nn.PixelUnshuffle(2 ** i),
+                ViTBlock(window_size, level_dim, n_heads=n_heads, ffn_scale=ffn_scale, drop_path=drop_path),
+                nn.PixelShuffle(2 ** i)
+            ) for i in range(1, levels)
+        ])'''
+
         self.level_layer = nn.ModuleList([
             nn.Sequential(
                 PatchMerging(dim=level_dim, scale=2 ** i),
@@ -241,7 +256,7 @@ class MSFBlock_4(nn.Module):
 class ResidualBlock(nn.Module):
     def __init__(self, n_sub_blocks, levels, window_size, dim, level_dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.):
         super().__init__()
-        self.layers = nn.Sequential(*[MSFBlock_4(
+        self.layers = nn.Sequential(*[MSFBlock_3(
             levels=levels,
             level_dim=level_dim,
             dim=dim,

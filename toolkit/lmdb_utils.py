@@ -2,10 +2,10 @@ import sys
 from multiprocessing import Pool, cpu_count
 import cv2
 import lmdb
-from utils import scandir
 from os import path as osp
 from tqdm import tqdm
 import os
+from .utils import scandir
 
 def get_keys_from_lmdb(lmdb_path):
     image_keys_list = []
@@ -20,14 +20,12 @@ def get_keys_from_lmdb(lmdb_path):
 
     return sorted(image_keys_list), len(image_keys_list)
 
-
 def create_lmdb_from_folder(folder_path, lmdb_path, map_size_gb=None, n_thread=None, batch_size=5000, compress_level=1):
 
     if osp.exists(lmdb_path):
         print(f'Folder {lmdb_path} already exists. Exit.')
         return
 
-    print('Reading image path list ...')
     img_path_list = sorted(list(scandir(folder_path, suffix='png', recursive=True, full_path=False)))
 
     if not img_path_list:
@@ -40,7 +38,6 @@ def create_lmdb_from_folder(folder_path, lmdb_path, map_size_gb=None, n_thread=N
         n_thread = cpu_count()
 
     if map_size_gb is None:
-        print("Estimating LMDB map size...")
         first_img_path = osp.join(folder_path, img_path_list[0])
         _, first_img_byte, _ = read_img_worker_args((first_img_path, "dummy_key", compress_level))
         data_size_per_img = len(first_img_byte)
@@ -49,9 +46,6 @@ def create_lmdb_from_folder(folder_path, lmdb_path, map_size_gb=None, n_thread=N
         print(f"Estimated data size: {estimated_total_size / (1024**3):.2f} GiB. Setting map_size to {map_size / (1024**3):.2f} GiB.")
     else:
         map_size = int(map_size_gb * 1024 * 1024 * 1024)
-
-    print(f'Creating LMDB for {folder_path}, saving to {lmdb_path}...')
-    print(f'Total images: {len(img_path_list)}')
 
     with lmdb.open(lmdb_path, map_size=map_size) as env:
         with open(osp.join(lmdb_path, 'meta_info.txt'), 'w') as meta_file:
@@ -69,7 +63,7 @@ def create_lmdb_from_folder(folder_path, lmdb_path, map_size_gb=None, n_thread=N
 
             tasks = [(osp.join(folder_path, rel_path), key, compress_level) for rel_path, key in zip(img_path_list, keys)]
 
-            with Pool(processes=n_thread) as pool, tqdm(total=len(img_path_list), unit='image') as pbar:
+            with Pool(processes=n_thread) as pool, tqdm(total=len(img_path_list), unit='image', desc="Creating LMDB") as pbar:
                 for i, (result_key, img_byte, img_shape) in enumerate(pool.imap_unordered(read_img_worker_args, tasks)):
                     if img_byte is None:
                         print(f"Warning: Failed to read/process image for key {result_key}. Skipping.")
@@ -84,15 +78,12 @@ def create_lmdb_from_folder(folder_path, lmdb_path, map_size_gb=None, n_thread=N
                     meta_file.write(f'{result_key} {original_filename} ({h},{w},{c})\n')
 
                     pbar.update(1)
-                    pbar.set_description(f'Writing {result_key}')
 
                     if (i + 1) % batch_size == 0:
                         txn.commit()
                         txn = env.begin(write=True)
 
                 txn.commit()
-
-    print('\nFinished writing LMDB.')
 
 def read_img_worker_args(args):
     path, key, compress_level = args

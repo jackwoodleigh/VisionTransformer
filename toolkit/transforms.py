@@ -3,9 +3,8 @@ import torch
 import torchvision.transforms.functional as F
 import numpy as np
 
-
-def bicubic_downscale(hr, scale):
-    return cv2.resize(hr.transpose(1, 2, 0), (hr[-2]//scale.scale_factor, hr[-1]//scale.scale_factor), interpolation=cv2.INTER_CUBIC).transpose(2, 0, 1)
+def bicubic_downscale_HWC(hr, scale):
+    return cv2.resize(hr, (hr.shape[1]//scale, hr.shape[0]//scale), interpolation=cv2.INTER_CUBIC)
 
 # B, C, H, W
 def paired_random_crop(hr, lr, size, scale=4):
@@ -21,24 +20,25 @@ def paired_random_crop(hr, lr, size, scale=4):
     return hr_c, lr_c
 
 # B, C, H, W
-def random_flip_horizontal(x):
+def paired_random_flip_horizontal(hr, lr):
     if np.random.rand() < 0.5:
-        return x[..., :, ::-1]
-    return x
+        return hr[..., :, ::-1], lr[..., :, ::-1]
+    return hr, lr
 
 # B, C, H, W
-def random_flip_vertical(x):
+def paired_random_flip_vertical(hr, lr):
     if np.random.rand() < 0.5:
-        return x[..., ::-1, :]
-    return x
+        return hr[..., ::-1, :], lr[..., ::-1, :]
+    return hr, lr
 
-def random_rotate(x):
-    return np.rot90(x, k=np.random.randint(0, 4), axes=(-2, -1))
+def paired_random_rotate(hr, lr):
+    x = np.random.randint(0, 4)
+    return np.rot90(hr, k=x, axes=(-2, -1)), np.rot90(lr, k=x, axes=(-2, -1))
 
-def normalize(x, mean=0.5, std=2):
+def normalize(x, mean=0.5, std=4):
     return (x - mean) * std
 
-def denormalize(x, mean=0.5, std=2):
+def denormalize(x, mean=0.5, std=4):
     return torch.clamp((x / std) + mean, min=0, max=1.0)
 
 

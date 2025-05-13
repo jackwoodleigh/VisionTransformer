@@ -9,10 +9,11 @@ import numpy as np
 from torch.utils.checkpoint import checkpoint
 from torch.amp import autocast, GradScaler
 #from torch.cuda.amp import autocast, GradScaler
-from toolkit.utils import save_images_comparison, save_images, tensor_to_pil, create_image_grid, infinite_dataloader, calculate_psnr_pt_y_channel, calculate_ssim_pt_y_channel
+from toolkit.utils import save_images_comparison, save_images, tensor_to_pil, create_image_grid, calculate_psnr_pt_y_channel, calculate_ssim_pt_y_channel
 from toolkit.param_ema import ParameterEMA
 import copy
-
+from toolkit.datasets import infinite_dataloader
+from .transforms import denormalize
 import torch.nn.functional as F
 
 class ModelHelper:
@@ -55,9 +56,8 @@ class ModelHelper:
         torch.save(save, path)
         print(f"Saved model to: {path}")
 
-    def load_model(self, directory, file_name, load_optimizer=True):
-        path = os.path.join(directory, "ModelSaves", file_name)
-        save = torch.load(path)
+    def load_model(self, src, load_optimizer=True):
+        save = torch.load(src)
 
         self.model.load_state_dict(save['model_state_dict'])
         self.ema_model.load_state_dict(save['ema_model_state_dict'])
@@ -65,7 +65,7 @@ class ModelHelper:
         if load_optimizer:
             self.optimizer.load_state_dict(save['optimizer_state_dict'])
 
-        print(f"Loaded model from: {path}")
+        print(f"Loaded model from: {src}")
 
     def sync(self, sec=0, clear_cache=False):
         if self.multi_gpu:
@@ -77,9 +77,6 @@ class ModelHelper:
             time.sleep(sec)
 
     def sample_model(self, random_sample, dataset, save_img=False, save_compare=False, use_ema_model=True):
-
-        '''r = [23, 50, 78]
-        stack = [dataset[i] for i in r]'''
         r = random.randint(0, len(dataset) - random_sample)
         stack = [dataset[i] for i in range(r, r + random_sample)]
         hr_list, lr_list = zip(*stack)
@@ -170,16 +167,15 @@ class ModelHelper:
         self.model.eval()
         self.ema_model.eval()
         with torch.no_grad():
-            pbar = tqdm(test_loader, disable=(self.rank != 0), desc=f"Validating - Epoch {e + 1}/{epochs}", leave=True, dynamic_ncols=True)
-            for i, (hr, lr) in enumerate(pbar):
+            for i, (hr, lr) in enumerate(tqdm(test_loader, disable=(self.rank != 0), desc=f"Validating - Epoch {e + 1}/{epochs}", leave=True, dynamic_ncols=True)):
                 if interp:
                     hr_p = F.interpolate(lr.to(self.device), scale_factor=4, mode='bicubic')
                 else:
                     loss, hr_p = self.predict(hr, lr, use_ema_model=e + 1 > ema_start_epoch or not self.new_ema)
                     epoch_validation_losses.append(loss.item())
 
-                ssim.append(calculate_ssim_pt_y_channel(hr_p.float(), hr.to(self.device).float(), crop_border=3).mean().item())
-                psnr.append(calculate_psnr_pt_y_channel(hr_p.float(), hr.to(self.device).float(), crop_border=3).mean().item())
+                ssim.append(calculate_ssim_pt_y_channel(denormalize(hr_p.float()), denormalize(hr.to(self.device).float()), crop_border=3).mean().item())
+                psnr.append(calculate_psnr_pt_y_channel(denormalize(hr_p.float()), denormalize(hr.to(self.device).float()), crop_border=3).mean().item())
 
         return epoch_validation_losses, ssim, psnr
 
@@ -188,10 +184,10 @@ class ModelHelper:
         total_epochs = config["training"]["epochs"]
         accumulation_steps = config["training"]["accumulation_steps"]
         ema_start_epoch = config["training"]["ema_start_epoch"]
-        save_model_every_i_epoch = config["tools"]["save_model_every_i_epoch"]
-        path = config["tools"]["logging_path"]
-        model_save_name = config["tools"]["model_save_name"]
-        log = config["tools"]["wandb_log"]
+        save_model_every_i_epoch = config["logging"]["save_model_every_i_epoch"]
+        path = config["logging"]["path"]
+        model_save_name = config["logging"]["model_save_name"]
+        log = config["logging"]["wandb_log"]
 
         self.ema_model.eval()
         self.optimizer.zero_grad(set_to_none=True)
@@ -202,6 +198,7 @@ class ModelHelper:
 
         itrs_per_epoch = (iterations // total_epochs)
         train_itr = infinite_dataloader(train_loader)
+
         self.sync(sec=2)
 
         for e in range(total_epochs):
@@ -215,7 +212,7 @@ class ModelHelper:
 
             # Validation Loop
             epoch_validation_losses, ssim, psnr = self.validation_loop(test_loader, e, total_epochs, ema_start_epoch)
-
+            print(np.mean(epoch_validation_losses))
             self.sync(sec=2, clear_cache=True)
 
             if self.rank == 0:
@@ -233,7 +230,7 @@ class ModelHelper:
                     }
                     if train_dataset is not None:
                         hr_p, hr = self.sample_model(random_sample=6, dataset=test_dataset, use_ema_model=e+1 > ema_start_epoch)
-                        pil_images = tensor_to_pil(hr_p)
+                        pil_images = tensor_to_pil(denormalize(hr_p))
                         grid_image = create_image_grid(pil_images, grid_size=(3, 2))
                         image = wandb.Image(grid_image, caption="Upscaled Images Grid")
                         log["Image"] = image

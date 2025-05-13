@@ -2,9 +2,9 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torchvision.models as models
-from toolkit.utils import denormalize_image
+from .transforms import denormalize
 
-
+# TODO
 class PerceptualLoss(nn.Module):
     def __init__(self, layer_index=12):
         super().__init__()
@@ -20,8 +20,8 @@ class PerceptualLoss(nn.Module):
         return (x - self.mean.to(x.device)) / self.std.to(x.device)
 
     def forward(self, predicted, target):
-        predicted = denormalize_image(predicted, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
-        target = denormalize_image(target, [0.5, 0.5, 0.5], [0.25, 0.25, 0.25])
+        predicted = denormalize(predicted)
+        target = denormalize(target)
         predicted_features = self.features(self.norm(predicted))
         target_features = self.features(self.norm(target.detach()))
         return F.mse_loss(predicted_features, target_features)
