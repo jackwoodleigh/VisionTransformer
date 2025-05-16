@@ -4,26 +4,20 @@ import torch.multiprocessing as mp
 from toolkit.init import *
 
 
-# TODO compare conv upscaling and interpolation
-# TODO clean up the LMDB and data prep - possible multi threat extract better
-# TODO clean up main - look at transforms and maybe do with tensors
 # TODO figure issue with performance on multiple gpu
 # TODO Add data prep to config
 
 # TODO Test MLP ratios
 # TODO Test window sizes
 
-# TODO Cuda prefetch?
-# TODO save paired images that are downscaled then do paired random crop
 # do downscale when 0-255
-
+import wandb
 
 def training(rank, config, world_size=0):
     model, helper, (train_dataset, test_dataset, sampler, train_loader, test_loader) = init(config, rank, world_size)
     if rank == 0:
         # Start W&B run
         if config["logging"]["wandb_log"]:
-            import wandb
             wandb.login()
             wandb.init(
                 project="SuperResolution",
@@ -42,6 +36,8 @@ def training(rank, config, world_size=0):
     )
     if world_size != 0:
         dist.destroy_process_group()
+    if config["logging"]["wandb_log"]:
+        wandb.finish()
 
 def sample_images(config, count):
     model, helper, (train_dataset, test_dataset, train_loader, test_loader) = init(config)

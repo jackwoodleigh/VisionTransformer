@@ -17,7 +17,7 @@ from .transforms import denormalize
 import torch.nn.functional as F
 
 class ModelHelper:
-    def __init__(self, model, optimizer, scheduler, criterion, multi_gpu=False, ema_beta=0.995, device="cuda", rank=0):
+    def __init__(self, model, optimizer, criterion, scheduler=None, multi_gpu=False, ema_beta=0.995, device="cuda", rank=0):
         self.model = model
         self.optimizer = optimizer
         self.criterion = criterion
@@ -34,6 +34,8 @@ class ModelHelper:
         self.ema_model = copy.deepcopy(self.model).eval().requires_grad_(False).to(self.device)
         self.scaler = GradScaler()
         self.new_ema = True
+
+        self.ema_loss_decay = 0.999
 
     def get_parameter_count(self):
         return sum(p.numel() for p in self.model.parameters())
@@ -101,6 +103,7 @@ class ModelHelper:
             model = self.ema_model
         else:
             model = self.model
+
         if no_grad:
             with torch.no_grad():
                 if use_checkpoint:
@@ -113,10 +116,10 @@ class ModelHelper:
             else:
                 return model(lr)
 
-    def predict(self, hr, lr, use_ema_model=False):
+    def predict(self, hr, lr, use_ema_model=False, use_checkpoint=True, no_grad=False):
         with autocast(device_type="cuda"):
-            hr_p = self.model_call(lr.to(self.device), use_ema_model=use_ema_model)
-            loss = self.criterion(hr_p.to(self.device), hr.to(self.device))
+            hr_p = self.model_call(lr, use_ema_model=use_ema_model, use_checkpoint=use_checkpoint, no_grad=no_grad)
+            loss = self.criterion(hr_p, hr)
         return loss, hr_p
 
     def update_params(self):
@@ -127,55 +130,65 @@ class ModelHelper:
         self.optimizer.zero_grad(set_to_none=True)
         self.ema.step_ema(ema_model=self.ema_model, model=self.model, new_ema=self.new_ema)
 
-    def training_loop(self, train_itr, itrs_per_epoch, e, total_epochs, accumulation_steps, ema_loss, ema_loss_decay, ema_start_epoch):
+    def train_loop(self, itr, n, accumulation_steps, desc, ema_loss=None):
         self.model.train()
-        epoch_training_losses = []
-        loss_accumulator = 0
-        pbar = tqdm(range(itrs_per_epoch), disable=(self.rank != 0), desc=f"Training - Epoch {e + 1}/{total_epochs}", leave=True, dynamic_ncols=True)
+        losses = []
+        pbar = tqdm(range(n), disable=(self.rank != 0), desc=desc, leave=True, dynamic_ncols=True)
         for _ in pbar:
-            # gradient accumulation
+            loss = 0
             for _ in range(accumulation_steps):
-                hr, lr = next(train_itr)
-                loss, _ = self.predict(hr, lr)
-                loss /= accumulation_steps
-                loss_accumulator += loss.item()
-                self.scaler.scale(loss).backward()
+                hr, lr = next(itr)
+                hr, lr = hr.to(self.device), lr.to(self.device)
+                loss_b, _ = self.predict(hr, lr)
+                loss_b /= accumulation_steps
+                loss += loss_b.item()
+                self.scaler.scale(loss_b).backward()
 
             self.update_params()
-            epoch_training_losses.append(loss_accumulator)
-            self.scheduler.step()
+            losses.append(loss)
 
-            if e + 1 < ema_start_epoch:
-                ema_loss = np.mean(epoch_training_losses)
-            else:
-                ema_loss = ema_loss_decay * ema_loss + (1 - ema_loss_decay) * loss_accumulator
+            if self.scheduler is not None:
+                self.scheduler.step()
 
-            pbar.set_postfix({
-                "Batch Loss": f"{loss_accumulator:.5f}",
-                "Epoch Avg Loss": f"{np.mean(epoch_training_losses):.5f}",
-                "EMA Batch Loss": f"{ema_loss:.5f}",
+            pbar_postfix_data = {
+                "Batch Loss": f"{loss/2:.5f}",
+                "Avg Loss": f"{np.mean(losses)/2:.5f}",
                 "Learning_Rate": self.optimizer.param_groups[0]['lr']
-            })
-            loss_accumulator = 0
+            }
 
-        return epoch_training_losses, ema_loss
+            if ema_loss is not None:
+                ema_loss = self.ema_loss_decay * ema_loss + (1 - self.ema_loss_decay) * loss
+                pbar_postfix_data["EMA Loss"] = f"{ema_loss:.5f}"
 
-    def validation_loop(self, test_itr, n, e, epochs, ema_start_epoch):
-        epoch_validation_losses = []
-        ssim = []
-        psnr = []
+            pbar.set_postfix(pbar_postfix_data)
+
+        return losses, ema_loss
+
+    def validate_loop(self, itr, n, desc, use_ema_model=False, use_metrics=True):
         self.model.eval()
-        self.ema_model.eval()
-        with torch.no_grad():
-            for _ in enumerate(tqdm(range(len(test_itr)), disable=(self.rank != 0), desc=f"Validating - Epoch {e + 1}/{epochs}", leave=True, dynamic_ncols=True)):
-                hr, lr = next(test_itr)
-                loss, hr_p = self.predict(hr, lr) #use_ema_model=e + 1 > ema_start_epoch or not self.new_ema
-                epoch_validation_losses.append(loss.item())
+        losses = []
+        metrics = {'ssim': [], 'psnr': []}
+        pbar = tqdm(range(n), disable=(self.rank != 0), desc=desc, leave=True, dynamic_ncols=True)
+        for _ in pbar:
+            hr, lr = next(itr)
+            hr, lr = hr.to(self.device), lr.to(self.device)
+            loss, hr_p = self.predict(hr, lr, no_grad=True, use_ema_model=use_ema_model)
+            losses.append(loss.item())
 
-                ssim.append(calculate_ssim_pt_y_channel(denormalize(hr_p), denormalize(hr.to(self.device)), crop_border=3).mean().item())
-                psnr.append(calculate_psnr_pt_y_channel(denormalize(hr_p), denormalize(hr.to(self.device)), crop_border=3).mean().item())
+            pbar_postfix_data = {
+                "Batch Loss": f"{loss:.5f}",
+                "Avg Loss": f"{np.mean(losses):.5f}",
+            }
 
-        return epoch_validation_losses, ssim, psnr
+            if use_metrics:
+                metrics['ssim'].append(calculate_ssim_pt_y_channel(denormalize(hr_p), denormalize(hr.to(self.device)), crop_border=3).mean().item())
+                metrics['psnr'].append(calculate_psnr_pt_y_channel(denormalize(hr_p), denormalize(hr.to(self.device)), crop_border=3).mean().item())
+                pbar_postfix_data['SSIM'] = metrics['ssim'][-1]
+                pbar_postfix_data['PSNR'] = metrics['psnr'][-1]
+
+            pbar.set_postfix(pbar_postfix_data)
+
+        return losses, metrics
 
     def train_model(self, train_loader, test_loader, config, train_dataset=None, test_dataset=None):
         iterations = config["training"]["iterations"]
@@ -188,30 +201,29 @@ class ModelHelper:
         log = config["logging"]["wandb_log"]
 
         self.ema_model.eval()
+        self.ema.start_step = len(train_loader) * ema_start_epoch // accumulation_steps
+
         self.optimizer.zero_grad(set_to_none=True)
 
-        ema_loss_decay = 0.9999
         ema_loss = None
 
         itrs_per_epoch = (iterations // total_epochs)
-        self.ema.start_step = itrs_per_epoch * ema_start_epoch
-
         train_itr = infinite_dataloader(train_loader)
         test_itr = infinite_dataloader(test_loader)
 
         self.sync(sec=2)
-
         for e in range(total_epochs):
             if self.multi_gpu:
                 train_loader.sampler.set_epoch(e)
 
             # Training Loop
-            epoch_training_losses, ema_loss = self.training_loop(train_itr, itrs_per_epoch, e, total_epochs, accumulation_steps, ema_loss, ema_loss_decay, ema_start_epoch)
+            training_losses, ema_loss = self.train_loop(train_itr, itrs_per_epoch, accumulation_steps, f"Training - Epoch {e + 1}/{total_epochs}", ema_loss)
 
-            self.sync(clear_cache=True)
+            self.sync(sec=2, clear_cache=True)
 
             # Validation Loop
-            epoch_validation_losses, ssim, psnr = self.validation_loop(test_itr, len(test_loader), e, total_epochs, ema_start_epoch)
+            validation_losses, metrics = self.validate_loop(test_itr, len(test_loader), f"Validating - Epoch {e + 1}/{total_epochs}", use_ema_model=False)#(e >= ema_start_epoch)
+
             self.sync(sec=2, clear_cache=True)
 
             if self.rank == 0:
@@ -223,23 +235,25 @@ class ModelHelper:
                 # Epoch logging
                 if log:
                     log = {
-                        "Training_Avg_Loss": np.mean(epoch_training_losses),
-                        "Training_EMA_Loss": ema_loss,
-                        "Validation_Avg_Loss": np.mean(epoch_validation_losses)
+                        "Training_Avg_Loss": np.mean(training_losses)/2,
+                        "Validation_Avg_Loss": np.mean(validation_losses)/2,
+                        'Training_EMA_Loss': ema_loss/2 if ema_loss is not None else np.mean(training_losses)/2
                     }
                     if train_dataset is not None:
-                        hr_p, hr = self.sample_model(random_sample=6, dataset=test_dataset, use_ema_model=False) #e+1 > ema_start_epoch
+                        hr_p, hr = self.sample_model(random_sample=6, dataset=test_dataset, use_ema_model=False) #(e >= ema_start_epoch)
                         pil_images = tensor_to_pil(denormalize(hr_p))
                         grid_image = create_image_grid(pil_images, grid_size=(3, 2))
                         image = wandb.Image(grid_image, caption="Upscaled Images Grid")
                         log["Image"] = image
-                        log["SSIM"] = np.mean(ssim)
-                        log["PSNR_"] = np.mean(psnr)
+                        log["SSIM"] = np.mean(metrics['ssim'])
+                        log["PSNR_"] = np.mean(metrics['psnr'])
 
                     wandb.log(log)
 
-            self.sync(clear_cache=True)
+            if e == 2:
+                ema_loss = np.mean(training_losses)
+
+            self.sync(clear_cache=True, sec=2)
             if self.rank == 0:
                 print("###################################################################")
-            time.sleep(2)
 

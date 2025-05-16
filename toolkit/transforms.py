@@ -35,10 +35,10 @@ def paired_random_rotate(hr, lr):
     x = np.random.randint(0, 4)
     return np.rot90(hr, k=x, axes=(-2, -1)), np.rot90(lr, k=x, axes=(-2, -1))
 
-def normalize(x, mean=0.5, std=4):
+def normalize(x, mean=0.5, std=2):
     return (x - mean) * std
 
-def denormalize(x, mean=0.5, std=4):
+def denormalize(x, mean=0.5, std=2):
     return torch.clamp((x / std) + mean, min=0, max=1.0)
 
 

@@ -16,6 +16,18 @@ from torch.utils.checkpoint import checkpoint
 
 # https://arxiv.org/pdf/2205.04437
 
+
+class ChannelLayerNorm(nn.Module):
+    def __init__(self, num_channels):
+        super().__init__()
+        self.ln = nn.LayerNorm(num_channels)
+
+    def forward(self, x):
+        x = x.permute(0, 2, 3, 1)
+        x = self.ln(x)
+        x = x.permute(0, 3, 1, 2)
+        return x
+
 class MLP(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, ffn_scale=4, drop=0.):
         super().__init__()
@@ -23,7 +35,7 @@ class MLP(nn.Module):
         hidden_features = hidden_features or int(in_features * ffn_scale)
         self.mlp = nn.Sequential(
             nn.Linear(in_features, hidden_features),
-            nn.GELU(),
+            nn.SiLU(),
             nn.Linear(hidden_features, out_features),
             nn.Dropout(drop)
         )
@@ -78,7 +90,7 @@ class PatchUnMerging(nn.Module):
         return x
 
 class WindowedMSA(nn.Module):
-    def __init__(self, window_size, dim, num_heads=4, attn_drop=0.1, proj_drop=0.):
+    def __init__(self, window_size, dim, num_heads=4, attn_drop=0.0, proj_drop=0.):
         super().__init__()
         self.window_size = window_size
         self.num_heads = num_heads
@@ -91,52 +103,75 @@ class WindowedMSA(nn.Module):
         self.attn_drop = attn_drop
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def window_partition(self, x, H, W):
-        B, N, C = x.shape
-        H_sp = W_sp = self.window_size
-
-        x = x.view(B, H, W, C)
-        x = x.view(B, H // H_sp, H_sp, W // W_sp, W_sp, C)
-        x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, H_sp * W_sp,  C)
-        x = x.view(-1, H_sp * W_sp, self.num_heads, C // self.num_heads)
-        return x.permute(0, 2, 1, 3).contiguous()
+    def window_partition(self, x, win):
+        B, H, W, C = x.shape
+        x = x.view(B, H // win, win, W // win, win, C)
+        x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, win * win,  C)
+        return x
 
     def reverse_window_partition(self, x, H, W):
-        C = x.shape[1] * x.shape[3]
-        H_sp = W_sp = self.window_size
+        # N, win*win, C
+        N, _, C = x.shape
+        win = self.window_size
 
-        x = x.permute(0, 2, 1, 3).contiguous().view(-1,  H_sp * W_sp, C)
-        x = x.view(-1, H_sp, W_sp, C)
-        x = x.view(-1, H // H_sp, W // W_sp, H_sp, W_sp, C)
-        return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, H, W, C).view(-1, H*W, C)
+        x = x.view(N, win, win, C)
+        x = x.view(-1, H // win, W // win, win, win, C)
+        return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, H, W, C)
 
-    def locally_enhanced_PE(self, x, H, W):
-        B, N, C = x.shape
-        H_sp = W_sp = self.window_size
+    def locally_enhanced_PE(self, x):
+        N, win_sq, C = x.shape
+        win = self.window_size
 
-        x = x.transpose(-2, -1).contiguous().view(B, C, H, W)
-        x = x.view(B, C, H // H_sp, H_sp, W // W_sp, W_sp)
-        x = x.permute(0, 2, 4, 1, 3, 5).contiguous().view(-1, C, H_sp, W_sp)
-
+        # N, win*win, C -> N, C, win, win
+        x = x.view(N, win, win, C).permute(0, 3, 1, 2).contiguous()
         lepe = self.pe_encoder(x)
-        lepe = lepe.reshape(-1, self.num_heads, C // self.num_heads, H_sp * W_sp).permute(0, 1, 3, 2).contiguous()
+        lepe = lepe.permute(0, 2, 3, 1).contiguous().view(N, win*win, C)
+        return self.headify(lepe)
 
-        x = x.reshape(-1, self.num_heads, C // self.num_heads, H_sp * W_sp).permute(0, 1, 3, 2).contiguous()
-        return x, lepe
+    def headify(self, x):
+        N, win, C = x.shape
+        x = x.view(N, win, self.num_heads, C // self.num_heads)
+        return x.permute(0, 2, 1, 3).contiguous()
 
-    def forward(self, x, H, W):
+    def deheadify(self, x):
+        # N, n_heads, Win, C // n_heads
+        N, _, win, _ = x.shape
+        return x.permute(0, 2, 1, 3).contiguous().view(N, win, -1)
+
+    def context_inj(self, x, context):
+        if context is not None:
+            # N, win, C
+            win = self.window_size
+            for c in context:
+                # B, C, H, W, -> N, Win/2**i, C
+                c = self.window_partition(c.permute(0, 2, 3, 1).contiguous(), win//2)
+                win = win // 2
+                x = torch.cat([x, c], dim=1)
+
+        return x
+
+    def forward(self, x, context=None):
+        B, H, W, C = x.shape
+
+        # B, H, W, C -> N, Win, C -> N, Win+context, C
+        x = self.window_partition(x, self.window_size)
+        x = self.context_inj(x, context)
+
+        # N, Win+context, C -> N, Win+context, 3*C
         qkv = self.qkv(x)
+
+        # N, Win, C -> N, n_heads, Win, C // n_heads
+        lepe = self.locally_enhanced_PE(qkv[:, :self.window_size**2, 2*C:])
+
+        # N, Win+context, 3*C -> N, n_heads, Win+context, 3*C // n_heads
+        qkv = self.headify(qkv)
         q, k, v = qkv.chunk(3, dim=-1)
 
-        # B, N, C -> B, n_heads, W_sp, C // n_heads
-        q = self.window_partition(q, H, W)
-        k = self.window_partition(k, H, W)
-        v, lepe = self.locally_enhanced_PE(v, H, W)
+        # N, n_heads, Win+context, C // n_heads -> N, n_heads, Win, C // n_heads
+        x = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop)[:, :, :self.window_size**2, :] + lepe
 
-        x = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop) + lepe
-
-        # B, n_heads, W_sp, C // n_heads -> B, N, C
-        x = self.reverse_window_partition(x, H, W)
+        # N, n_heads, W_sp, C // n_heads -> B, H, W, C
+        x = self.reverse_window_partition(self.deheadify(x), H, W)
 
         x = self.out_proj(x)
         x = self.proj_drop(x)
@@ -146,113 +181,51 @@ class WindowedMSA(nn.Module):
 class ViTBlock(nn.Module):
     def __init__(self, window_size, dim, n_heads=4, ffn_scale=2, drop_path=0.0):
         super().__init__()
-        self.msa = WindowedMSA(dim=dim, window_size=window_size, num_heads=n_heads)
+        self.wmsa = WindowedMSA(dim=dim, window_size=window_size, num_heads=n_heads)
         self.mlp = MLP(dim, ffn_scale=ffn_scale)
         self.ln1 = nn.LayerNorm(dim)
         self.ln2 = nn.LayerNorm(dim)
         self.drop_path = nn.Dropout(drop_path)
 
-    # Needs to work with B, H, W, C
-    def forward(self, x):
-        B, C, H, W = x.shape
+    def forward(self, x, context=None):
+        # B, C, H, W -> B, H, W, C
+        x = x.permute(0, 2, 3, 1).contiguous()
 
-        # B, C, H, W -> B, N, C
-        x = x.view(B, C, H*W).permute(0, 2, 1).contiguous()
-
-        x = self.drop_path(self.msa(self.ln1(x), H, W)) + x
+        x = self.drop_path(self.wmsa(self.ln1(x), context)) + x
         x = self.drop_path(self.mlp(self.ln2(x))) + x
 
-        # B, N, C -> B, C, H, W
-        x = x.permute(0, 2, 1).contiguous().view(B, C, H, W)
+        # B, H, W, C -> B, C, H, W
+        x = x.permute(0, 3, 1, 2).contiguous()
         return x
+
 
 class MSFBlock_3(nn.Module):
     def __init__(self, levels, window_size, dim, level_dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.0):
         super().__init__()
         self.levels = levels
-        level_dim = dim // 2
 
-        self.init_ds = nn.Conv2d(dim, level_dim, 1, 1)
-        self.level_ds = nn.ModuleList([nn.Conv2d(level_dim // (4 ** i), level_dim // (4 ** (i + 1)), 1, 1) for i in range(levels - 1)])
-
-        '''self.level_layer = nn.ModuleList([
-            nn.Sequential(
-                nn.PixelUnshuffle(2 ** i),
-                ViTBlock(window_size, level_dim, n_heads=n_heads, ffn_scale=ffn_scale, drop_path=drop_path),
-                nn.PixelShuffle(2 ** i)
-            ) for i in range(1, levels)
-        ])'''
-        self.level_layer = nn.ModuleList([
-            nn.Sequential(
-                PatchMerging(dim=level_dim, scale=2 ** i),
-                ViTBlock(window_size, level_dim, n_heads=n_heads, ffn_scale=ffn_scale, drop_path=drop_path),
-                PatchUnMerging(dim=level_dim, scale=2 ** i)
-            ) for i in range(1, levels)
-        ])
-
-        total_level_dim = sum([level_dim // (4 ** i) for i in range(1, levels)])
-        self.post_level_fuse = nn.Conv2d(total_level_dim, total_level_dim, 3, 1, 1)
-        self.fuse = nn.Sequential(
-            ViTBlock(window_size, dim + total_level_dim, n_heads=n_heads_fuse, ffn_scale=ffn_scale, drop_path=drop_path),
-            nn.Conv2d(dim + total_level_dim, dim, 1, 1),
-        )
-
-        self.rezero = nn.Parameter(torch.zeros(1))
-
-    def forward(self, x):
-        maps = []
-        z = self.init_ds(x)
-        for i in range(self.levels - 1):
-            z = self.level_ds[i](z)
-            maps.append(self.level_layer[i](z))
-
-        levels = self.post_level_fuse(torch.cat(maps, dim=1))
-        return self.rezero * self.fuse(torch.cat([x, levels], dim=1)) + x
-
-
-class MSFBlock_4(nn.Module):
-    def __init__(self, levels, window_size, dim, level_dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.0):
-        super().__init__()
-        self.levels = levels
-        level_dim = dim // 2
-
-        self.each_level_dims = [level_dim // 4 ** i for i in range(1, levels)]
-        total_level_dim = sum(self.each_level_dims)
-        self.ds = nn.Conv2d(dim, total_level_dim, 1, 1)
-
-        '''self.level_layer = nn.ModuleList([
-            nn.Sequential(
-                nn.PixelUnshuffle(2 ** i),
-                ViTBlock(window_size, level_dim, n_heads=n_heads, ffn_scale=ffn_scale, drop_path=drop_path),
-                nn.PixelShuffle(2 ** i)
-            ) for i in range(1, levels)
-        ])'''
+        self.downsample = nn.ModuleList([nn.Conv2d(dim // (4 ** i), dim // (4 ** (i + 1)), 1, 1) for i in range(levels - 1)])
 
         self.level_layer = nn.ModuleList([
             nn.Sequential(
-                PatchMerging(dim=level_dim, scale=2 ** i),
-                ViTBlock(window_size, level_dim, n_heads=n_heads, ffn_scale=ffn_scale, drop_path=drop_path),
-                PatchUnMerging(dim=level_dim, scale=2 ** i)
+                PatchMerging(dim=dim, scale=2 ** i),
+                ViTBlock(window_size, dim, n_heads=n_heads, ffn_scale=ffn_scale, drop_path=drop_path),
+                nn.Conv2d(dim, dim, 5, 1, 2, groups=dim)
             ) for i in range(1, levels)
         ])
 
-        self.post_level_fuse = nn.Conv2d(total_level_dim, total_level_dim, 3, 1, 1)
-        self.fuse = nn.Sequential(
-            ViTBlock(window_size, dim + total_level_dim, n_heads=n_heads_fuse, ffn_scale=ffn_scale, drop_path=drop_path),
-            nn.Conv2d(dim + total_level_dim, dim, 1, 1),
-        )
-
+        self.fuse = ViTBlock(window_size, dim, n_heads=n_heads_fuse, ffn_scale=ffn_scale, drop_path=drop_path)
+        self.out_conv = nn.Conv2d(dim, dim, 3, 1, 1)
         self.rezero = nn.Parameter(torch.zeros(1))
 
     def forward(self, x):
-        z = self.ds(x)
-        z_maps = list(z.split(self.each_level_dims, dim=1))
-
+        context_maps = []
+        z = x
         for i in range(self.levels - 1):
-            z_maps[i] = self.level_layer[i](z_maps[i])
+            z = self.downsample[i](z)
+            context_maps.append(self.level_layer[i](z))
 
-        level_context = self.post_level_fuse(torch.cat(z_maps, dim=1))
-        return self.rezero * self.fuse(torch.cat([x, level_context], dim=1)) + x
+        return self.rezero * self.out_conv(self.fuse(x, context_maps)) + x
 
 class ResidualBlock(nn.Module):
     def __init__(self, n_sub_blocks, levels, window_size, dim, level_dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.):

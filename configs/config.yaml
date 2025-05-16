@@ -1,25 +1,25 @@
 model:
   scale_factor: 4
   block_type: "default"
-  n_blocks: 6
-  n_sub_blocks: 6
+  n_blocks: 4
+  n_sub_blocks: 4
   levels: 3
-  dim: 128
+  dim: 144
   level_dim: 96
-  n_heads: 4
-  n_heads_fuse: 4
+  n_heads: 6
+  n_heads_fuse: 6
   feature_dim: 64
-  window_size: 8
+  window_size: 16
 
 
 training:
   learning_rate: 0.00015
-  batch_size_per_gpu: 2
+  batch_size_per_gpu: 8
   accumulation_steps: 1
-  iterations: 5000
+  iterations: 500000
   epochs: 100
   model_ema: 0.999
-  ema_start_epoch: 2
+  ema_start_epoch: 3
   criterion:
     L1: 1.0
     #FFTLoss: 0.05

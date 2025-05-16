@@ -5,14 +5,14 @@ import numpy as np
 import torch
 from torchvision import transforms
 
-from toolkit.model_helper import ModelHelper
+from toolkit.model_helper2 import ModelHelper
 from .datasets import SuperResolutionDataset
 import warnings
 from toolkit.loss_functions import Criterion
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
-from msft_arch import MSFTransformer
+from msft_arch2 import MSFTransformer
 from .prefetcher import PrefetchDataLoader
 from .transforms import PadImg
 
@@ -75,25 +75,14 @@ def init_data(config, rank=0):
     if config["tools"]["multi_gpu_enable"]:
         sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
 
-    if config["tools"]["prefetching_dataloader"]:
-        train_loader = PrefetchDataLoader(
-            num_prefetch_queue=2,
-            dataset=train_dataset,
-            batch_size=config["training"]["batch_size_per_gpu"],
-            shuffle=(sampler is None),
-            num_workers=config["dataset"]["num_dataloader_workers"],
-            pin_memory=True,
-            sampler=sampler
-        )
-    else:
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=config["training"]["batch_size_per_gpu"],
-            shuffle=(sampler is None),
-            num_workers=config["dataset"]["num_dataloader_workers"],
-            pin_memory=True,
-            sampler=sampler
-        )
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config["training"]["batch_size_per_gpu"],
+        shuffle=(sampler is None),
+        num_workers=config["dataset"]["num_dataloader_workers"],
+        pin_memory=True,
+        sampler=sampler
+    )
 
     # TODO only on rank=0?
     test_loader = DataLoader(
@@ -111,6 +100,7 @@ def init(config, rank=0, world_size=0):
     warnings.filterwarnings("ignore", message=".*compiled with flash attention.*")
     torch.backends.cudnn.benchmark = config["tools"]["benchmark"]
     torch.backends.cudnn.deterministic = config["tools"]["deterministic"]
+    #torch.autograd.set_detect_anomaly(True)
 
     if config["tools"]["multi_gpu_enable"]:
         if rank == 0:
@@ -140,16 +130,12 @@ def init(config, rank=0, world_size=0):
     if config["tools"]["multi_gpu_enable"]:
         model = DDP(model, device_ids=[rank])
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=config["training"]["learning_rate"], betas=(0.9, 0.999))
+    optimizer = torch.optim.Adam(model.parameters(), lr=config["training"]["learning_rate"], betas=(0.9, 0.99))
     criterion = Criterion(config["training"]["criterion"])
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["training"]["iterations"], eta_min=1e-5)
-    #milestones = [300000, 500000, 650000, 700000, 750000]
-    '''milestones = [40000, 190000, 240000, 290000]
-    # [250000, 400000, 450000, 475000]
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.5)'''
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["training"]["iterations"], eta_min=5e-6)
 
-    helper = ModelHelper(model, optimizer, scheduler, criterion, ema_beta=config["training"]["ema_start_epoch"], multi_gpu=config["tools"]["multi_gpu_enable"], rank=rank)
+    helper = ModelHelper(model, optimizer, criterion, scheduler, ema_beta=config["training"]["ema_start_epoch"], multi_gpu=config["tools"]["multi_gpu_enable"], rank=rank)
 
     size = helper.get_parameter_count()
     config["model_size"] = size
