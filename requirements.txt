@@ -6,3 +6,4 @@ wandb
 timm
 kornia
 gdown
+flash-attn

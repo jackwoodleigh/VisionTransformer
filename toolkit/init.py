@@ -12,7 +12,7 @@ from toolkit.loss_functions import Criterion
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
-from msft_arch2 import MSFTransformer
+from msft_arch3 import MSFTransformer
 from .prefetcher import PrefetchDataLoader
 from .transforms import PadImg
 
