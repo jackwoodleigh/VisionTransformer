@@ -119,10 +119,9 @@ class WindowedMSA(nn.Module):
         x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, win * win,  C)
         return x
 
-    def reverse_window_partition(self, x, H, W):
+    def reverse_window_partition(self, x, win, H, W):
         # N, win*win, C
         N, _, C = x.shape
-        win = self.window_size
         x = x.view(N, win, win, C)
         x = x.view(-1, H // win, W // win, win, win, C)
         return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, H, W, C)
@@ -156,29 +155,47 @@ class WindowedMSA(nn.Module):
             outs.append(x.permute(0, 2, 1, 3).contiguous().view(N, win, -1))
         return outs if len(outs) > 1 else outs[0]
 
+    def sub_window_pool(self, x, win):
+        # N, Win, C
+        N, Win, C = x.shape
+        return x.view(N, Win // win, win, C).mean()
+
     def cross_attn_gates(self, x, q, context):
-        # N, win, C
+        # x: B, H, W, C
+        # q: B, H, W, C
+
+        sub_cross_win = 8*8
         for i in range(len(context)):
-            # B, C, H, W, -> N, Win, C
-            B, C, H, W = context[i].shape
+            # B, C, H, W -> N, Win, C
+            B, H, W, C = x.shape
+            x = self.cross_mlp[i](x)
 
-            z = self.cross_mlp[i](context[i])
-            z_c = z.view(B, C, H*W).mean(dim=2).view(B, C, 1, 1)
+            # B, H*W, 1
+            x_s = x.mean(dim=2, keepdim=True)
 
-            z_s = z.mean(dim=1, keepdim=True)
+            # B, H*W, C -> N2, CrossWin, C
+            x = self.window_partition(x, 64)
+            N, win, _ = x.shape
+
+            # N2, H*W / cross_win, cross_win, C -> N2, H*W / cross_win, C
+            x_c = x.view(N, win // sub_cross_win, sub_cross_win, C).mean(dim=2)
+
+            k, v = self.cross_kv[i](x_c).chunk(2, dim=-1)
+            k, v = self.headify(k, v)
+            
 
             z = z_c * z_s
             z = self.cross_conv[i](z)
 
-            z = self.window_partition(z.permute(0, 2, 3, 1).contiguous(), self.window_size)
-            k, v = self.cross_kv[i](z).chunk(2, dim=-1)
-            k, v = self.headify(k, v)
+
+
+
 
             z = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop)
 
             # N, n_heads, Win, C/n_heads -> B, H, W, C
             z = self.deheadify(z)
-            z = self.reverse_window_partition(z, H, W).permute(0, 3, 1, 2).contiguous()
+            z = self.reverse_window_partition(z, self.window_size, H, W).permute(0, 3, 1, 2).contiguous()
 
             x += z
 
@@ -188,24 +205,25 @@ class WindowedMSA(nn.Module):
         B, H, W, C = x.shape
 
         # B, H, W, C -> N, Win, C -> N, n_heads, Win, C // n_heads
-        x = self.window_partition(x, self.window_size)
-        qkv = self.qkv(x)
+        z = self.window_partition(x, self.window_size)
+        qkv = self.qkv(z)
         qkv = self.headify(qkv)
         q, k, v = qkv.chunk(3, dim=-1)
 
         lepe = self.locally_enhanced_PE(v)
 
-        x = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop) + lepe
+        z = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop) + lepe
 
         # N, n_heads, W, C // n_heads -> B, H, W, C
-        x = self.deheadify(x)
-        x = self.reverse_window_partition(x, H, W)
+        z = self.deheadify(z)
+        z = self.reverse_window_partition(z, self.window_size, H, W)
+        q = self.reverse_window_partition(q, self.window_size, H, W)
 
-        x = self.cross_attn_gates(x, q, context)
+        z = self.cross_attn_gates(x, q, context)
 
-        x = self.out_proj(x)
-        x = self.proj_drop(x)
-        return x
+        z = self.out_proj(z)
+        z = self.proj_drop(z)
+        return z
 
 
 class ViTBlock(nn.Module):
