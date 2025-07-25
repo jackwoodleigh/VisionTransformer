@@ -6,7 +6,6 @@ from torch import nn
 import torch.nn.functional as F
 from torch.nn.modules.module import T
 from torch.utils.checkpoint import checkpoint
-
 # https://arxiv.org/pdf/2409.03516
 
 # https://arxiv.org/pdf/2208.11247v3
@@ -85,6 +84,33 @@ class WindowedAttention(nn.Module):
         self.num_heads = num_heads
         assert dim % num_heads == 0, f"dim ({dim}) must be divisible by num_heads ({num_heads})"
 
+        self.relative_position_bias_table = nn.Parameter(torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads))
+
+        # creates two grids that represent the two types of relationships between pairs aka a - b and b - a for
+        # win*win so its 2, win*win, win*win since each pixel has relationship with win*win
+        # 2, win, win -> 2, win^2 -> 2, win^2, win^2 -> win^2, win^2, 2
+        coords = torch.flatten(torch.stack(torch.meshgrid([self.win[0], self.win[1]])), 1)
+        relative_coords = coords[:, :, None] - coords[:, None, :]
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()
+
+        # since the values of the table have indexes from 0 to 6 thus the min and max are (-6, 6) so we adjust to make pairs positive
+        relative_coords[:, :, 0] += self.win[0] - 1
+        relative_coords[:, :, 1] += self.win[1] - 1
+        # scales so that it can be flattened and indexed in 1d
+        relative_coords[:, :, 0] *= 2 * self.win[0] - 1
+        # combines combos
+        # win^2, win^2
+        relative_position_index = relative_coords.sum(-1)
+        self.register_buffer("relative_position_index", relative_position_index)
+
+        trunc_normal_(self.relative_position_bias_table, std=.02)
+
+    def PE(self):
+        # win^2, win^2, n_heads -> -1, win^2, win^2 -> 1, n_heads, win^2, win^2
+        relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(self.win[0] * self.win[1], self.win[0] * self.win[1], -1)
+        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()
+        return relative_position_bias.unsqueeze(0)
+
     def window_partition(self, x, win, keep_batch=False):
         # Input shape: B, H, W, C
         # Output shape: N, win^2, C or B, H/win * W/win, win^2, C
@@ -101,13 +127,6 @@ class WindowedAttention(nn.Module):
         N, _, C = x.shape
         x = x.view(N, win, win, C).view(-1, H // win, W // win, win, win, C)
         return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, H, W, C)
-
-    def locally_enhanced_PE(self, x):
-        # Input shape: N, Win^2, C
-        # Output shape: N, Win^2, C
-        N, win_sq, C = x.shape
-        x = x.view(N, self.win, self.win, C).permute(0, 3, 1, 2).contiguous()
-        return self.pe_encoder(x).permute(0, 2, 3, 1).contiguous().view(N, self.win * self.win, C)
 
     def headify(self, *xs):
         # Input shape: N, Win, C
@@ -135,18 +154,16 @@ class WindowedContextCA(WindowedAttention):
         self.num_heads = num_heads
         self.q_kernel_size = 4
 
-        self.spatial_proj = LastChannelConv2D(dim, 1, 3, 1, 1)
-        #self.channel_proj = PatchMerging(dim, self.q_kernel_size)
         self.channel_proj = LastChannelConv2D(dim, dim, self.q_kernel_size, self.q_kernel_size, groups=dim)
 
-        self.pe_encoder = LastChannelConv2D(dim, dim, 3, 1, 1, groups=dim)
+        #self.pe_encoder = LastChannelConv2D(dim, dim, 3, 1, 1, groups=dim)
         self.kv_proj = nn.Linear(dim, dim * 2)
         self.q_proj = nn.Linear(dim, dim)
-
-        self.out_conv = LastChannelConv2D(dim, dim, 3, 1, 1)
-
-        self.sigmoid = nn.Sigmoid()
+        self.out_proj = nn.Linear(dim, dim)
         self.rezero = nn.Parameter(torch.zeros(1))
+
+        self.out_conv1 = LastChannelConv2D(dim, dim, 3, 1, 1)
+        self.out_conv2 = LastChannelConv2D(dim, dim, 3, 1, 1, groups=dim)
 
     def overlapping_windows(self, x):
         # Input shape: B, H, W, C
@@ -206,11 +223,7 @@ class WindowedContextCA(WindowedAttention):
         K = self.q_kernel_size
         H_K, W_K = H // K, W // K
 
-        # Find spatial summaries by reducing channel size to 1
-        # B, H, W, C -> B, H, W, 1 -> B, H/K * W/K, K**2, 1
-        x_s = self.window_partition(self.spatial_proj(x_wsa), K, keep_batch=True)
-
-        # Combine spatial regions to find channel summaries
+        # Combine spatial regions to find summaries
         # B, H, W, C -> B, H/K, W/K, C -> B, H/win, W/win, (win/K)**2, C -> B, H/win * W/win, (win/K)**2, C
         x_c = self.window_partition(self.channel_proj(x_wsa), self.win//K, keep_batch=True).view(B, (H//self.win) * (W//self.win), (self.win//K)**2, C)
 
@@ -227,13 +240,10 @@ class WindowedContextCA(WindowedAttention):
         x_cross = nn.functional.scaled_dot_product_attention(q, k, v)
         x_cross = self.reverse_window_partition(x_cross, self.win//K, H_K, W_K, with_batch=True).view(B, H_K * W_K, 1, C)
 
-        # Combine pixel and channel summaries for context modulation
-        # B, H/K * W/K, K**2, C -> B, H, W, C
-        x_cross_context = self.reverse_window_partition(x_s * x_cross, K, H, W, with_batch=True)
+        # B, H, W, C -> -> B, H/K * W/K, K**2, C
+        x_out = self.window_partition(self.out_conv1(x_wsa), K, keep_batch=True) + self.out_proj(x_cross)
 
-        x_cross_context = self.out_conv(x_cross_context)
-
-        return x_wsa + self.rezero * x_cross_context
+        return self.rezero * self.out_conv2(self.reverse_window_partition(x_out, K, H, W, with_batch=True))
 
 
 class WindowedMSA(WindowedAttention):
@@ -267,7 +277,7 @@ class WindowedMSA(WindowedAttention):
         # N, n_heads, W, C // n_heads -> B, H, W, C
         z = self.reverse_window_partition(self.deheadify(z), self.win, H, W)
 
-        z = self.context_ca(z, x)
+        z += self.context_ca(z, x)
 
         z = self.out_proj(z)
         z = self.proj_drop(z)
@@ -284,14 +294,8 @@ class ViTBlock(nn.Module):
         self.drop_path = nn.Dropout(drop_path)
 
     def forward(self, x):
-        # B, C, H, W -> B, H, W, C
-        x = x.permute(0, 2, 3, 1).contiguous()
-
         x = self.drop_path(self.wmsa(self.ln1(x))) + x
         x = self.drop_path(self.mlp(self.ln2(x))) + x
-
-        # B, H, W, C -> B, C, H, W
-        x = x.permute(0, 3, 1, 2).contiguous()
         return x
 
 
@@ -302,7 +306,11 @@ class MSFBlock_3(nn.Module):
         self.rezero = nn.Parameter(torch.zeros(1))
 
     def forward(self, x):
-        return x + self.rezero * self.fuse(x)
+        # B, H, W, C -> B, C, H, W
+        x = x.permute(0, 3, 1, 2).contiguous()
+        x = x + self.rezero * self.fuse(x)
+        # B, C, H, W -> B, H, W, C
+        return x.permute(0, 2, 3, 1).contiguous()
 
 class ResidualBlock(nn.Module):
     def __init__(self, n_sub_blocks, levels, window_size, dim, level_dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.):

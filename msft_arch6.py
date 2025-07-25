@@ -6,6 +6,7 @@ from torch import nn
 import torch.nn.functional as F
 from torch.nn.modules.module import T
 from torch.utils.checkpoint import checkpoint
+from toolkit.arch_util import trunc_normal_
 
 # https://arxiv.org/pdf/2409.03516
 
@@ -29,9 +30,9 @@ class ChannelLayerNorm(nn.Module):
         return x
 
 class LastChannelConv2D(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, groups=1):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, groups=1, dilation=1):
         super().__init__()
-        self.conv = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride, padding=padding, groups=groups)
+        self.conv = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation, groups=groups)
 
     def forward(self, x):
         # x: B, H, W, C
@@ -77,6 +78,29 @@ class PatchMerging(nn.Module):
 
         return x
 
+class RelativePositionalEncoding(nn.Module):
+    def __init__(self, q_size, k_size, num_heads=1):
+        super().__init__()
+        assert q_size <= k_size
+        self.relative_position_bias_table = nn.Parameter(torch.zeros((2 * k_size - 1) * (2 * k_size - 1), num_heads))
+
+        coords = torch.stack(torch.meshgrid(torch.arange(k_size), torch.arange(k_size), indexing='ij'), dim=0)
+
+        start = (k_size - q_size) // 2
+        end = start + q_size
+        coords_q = coords[:, start:end, start:end].reshape(2, -1)
+        coords_k = coords.reshape(2, -1)
+
+        relative_coords = coords_q[:, :, None] - coords_k[:, None, :]
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous() + k_size - 1
+        relative_position_index = relative_coords[:, :, 0] * (2 * k_size - 1) + relative_coords[:, :, 1]
+        self.register_buffer("relative_position_index", relative_position_index)
+        trunc_normal_(self.relative_position_bias_table, std=.02)
+
+    def forward(self):
+        bias = self.relative_position_bias_table[self.relative_position_index]
+        bias = bias.permute(2, 0, 1).contiguous().unsqueeze(0)
+        return bias
 
 class WindowedAttention(nn.Module):
     def __init__(self, window_size, dim, num_heads=4):
@@ -102,13 +126,6 @@ class WindowedAttention(nn.Module):
         x = x.view(N, win, win, C).view(-1, H // win, W // win, win, win, C)
         return x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, H, W, C)
 
-    def locally_enhanced_PE(self, x):
-        # Input shape: N, Win^2, C
-        # Output shape: N, Win^2, C
-        N, win_sq, C = x.shape
-        x = x.view(N, self.win, self.win, C).permute(0, 3, 1, 2).contiguous()
-        return self.pe_encoder(x).permute(0, 2, 3, 1).contiguous().view(N, self.win * self.win, C)
-
     def headify(self, *xs):
         # Input shape: N, Win, C
         # Output shape: N, n_heads, Win, C // n_heads
@@ -133,107 +150,50 @@ class WindowedContextCA(WindowedAttention):
         super().__init__(window_size, dim, num_heads)
         self.win = window_size
         self.num_heads = num_heads
-        self.q_kernel_size = 4
+        self.summary_size = 2
+        self.kernal_size = 3
+        self.win_s = window_size // self.summary_size
 
-        self.spatial_proj = LastChannelConv2D(dim, 1, 3, 1, 1)
-        #self.channel_proj = PatchMerging(dim, self.q_kernel_size)
-        self.channel_proj = LastChannelConv2D(dim, dim, self.q_kernel_size, self.q_kernel_size, groups=dim)
-
-        self.pe_encoder = LastChannelConv2D(dim, dim, 3, 1, 1, groups=dim)
-        self.kv_proj = nn.Linear(dim, dim * 2)
+        self.kv_proj = LastChannelConv2D(in_channels=dim, out_channels=2 * dim, kernel_size=5, padding=2, groups=num_heads)
         self.q_proj = nn.Linear(dim, dim)
 
-        self.out_conv = LastChannelConv2D(dim, dim, 3, 1, 1)
+        self.pe = RelativePositionalEncoding(q_size=self.win, k_size=self.win, num_heads=num_heads)
 
-        self.sigmoid = nn.Sigmoid()
+        self.out_proj = nn.Linear(dim, dim)
+        #self.out_conv = LastChannelConv2D(dim, dim, 3, 1, 1, groups=num_heads)
         self.rezero = nn.Parameter(torch.zeros(1))
-
-    def overlapping_windows(self, x):
-        # Input shape: B, H, W, C
-        # Output shape: B, H/win, W/win, 9*win^2, C
-
-        B, H, W, C = x.shape
-        win = self.win
-        kernel_size_unfold = 3 * win
-        stride_unfold = win
-        padding_unfold = win
-        H_win = (H + 2 * padding_unfold - kernel_size_unfold) // stride_unfold + 1
-        W_win = (W + 2 * padding_unfold - kernel_size_unfold) // stride_unfold + 1
-        L = H_win * W_win
-
-        x = x.permute(0, 3, 1, 2)
-        x_padded = F.pad(x, (padding_unfold, padding_unfold, padding_unfold, padding_unfold))
-        sB_pad, sC_pad, sH_pad, sW_pad = x_padded.stride()
-        shape_as_strided = (B, C, H_win, W_win, kernel_size_unfold, kernel_size_unfold)
-
-        strides_as_strided = (sB_pad, sC_pad, stride_unfold * sH_pad, stride_unfold * sW_pad, sH_pad, sW_pad)
-
-        # B, C, H/win, W/win, K * win, K * win
-        x_strided_patches = x_padded.as_strided(shape_as_strided, strides_as_strided)
-
-        # B, H/win, W/win, K*win, K*win, C
-        x = x_strided_patches.permute(0, 2, 3, 4, 5, 1)
-
-        # B, H/win * W/win, K^2 * win^2, C
-        x = x.reshape(B, L, kernel_size_unfold * kernel_size_unfold, C)
-
-        return x.contiguous()
-
-    def overlapping_windows_2(self, x):
-        # Input shape: B, H, W, C
-        # Output shape: B, H/win, W/win, 9*win^2, C
-
-        B, H, W, C = x.shape
-        H_win, W_win = H // self.win, W // self.win
-
-        x = x.permute(0, 3, 1, 2)
-        x = F.unfold(x, kernel_size=(3 * self.win, 3 * self.win), stride=self.win, padding=self.win)
-
-        # B, C * K^2 * win^2, H/win * W/win -> B, C, K^2 * win^2, H/win * W/win
-        x = x.view(B, C, 9 * self.win**2, H_win * W_win)
-
-        # B, C, K^2 * win^2, H/win * W/win -> B, H/win * W/win, K^2 * win^2, C
-        x = x.permute(0, 3, 2, 1).contiguous()
-        return x
 
     def forward(self, x_wsa, x_original):
         # x_wsa: B, H, W, C
-        # x_original: B * H/win * W/win, win^2, C
+        # x_original: B, H, W, C
 
         # TODO make kernel for overlapping windows
 
         B, H, W, C = x_wsa.shape
-        K = self.q_kernel_size
-        H_K, W_K = H // K, W // K
+        S = self.summary_size
+        H_S, W_S = H // S, W // S
 
-        # Find spatial summaries by reducing channel size to 1
-        # B, H, W, C -> B, H, W, 1 -> B, H/K * W/K, K**2, 1
-        x_s = self.window_partition(self.spatial_proj(x_wsa), K, keep_batch=True)
+        # B, H, W, C -> B, H/S, W/S, C -> B * H/win * W/win, (win/S)^2, C
+        q = self.window_partition(self.q_proj(x_wsa), self.win)
 
-        # Combine spatial regions to find channel summaries
-        # B, H, W, C -> B, H/K, W/K, C -> B, H/win, W/win, (win/K)**2, C -> B, H/win * W/win, (win/K)**2, C
-        x_c = self.window_partition(self.channel_proj(x_wsa), self.win//K, keep_batch=True).view(B, (H//self.win) * (W//self.win), (self.win//K)**2, C)
+        # B, H, W, C -> B * H/win * W/win, win^2, C
+        k, v = self.window_partition(self.kv_proj(x_original), self.win).chunk(2, dim=-1)
 
-        q = self.q_proj(x_c)
-        kv = self.kv_proj(x_original)
-        kv[..., C:] = kv[..., C:] + self.pe_encoder(kv[..., C:])
+        # B * (H/win) * (W/win), (win/S)^2, C -> B * (H/win) * (W/win), n_heads, K^2 * (win/S)^2, C/n_heads
+        q, k, v = self.headify(q, k, v)
 
-        # Produce overlapping window
-        # B, (H/win) * (W/win), K^2 * win^2, C
-        k, v = self.overlapping_windows_2(kv).chunk(2, dim=-1)
+        x_cross = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=self.pe())
 
-        # Cross attention using the channel summary x_c and neighboring windows with input tensor
-        # B, H/win * W/win, (win/K)**2, C -> B, H/K, W/K, C -> B, H/K * W/K, 1, C
-        x_cross = nn.functional.scaled_dot_product_attention(q, k, v)
-        x_cross = self.reverse_window_partition(x_cross, self.win//K, H_K, W_K, with_batch=True).view(B, H_K * W_K, 1, C)
+        # B * (H/win) * (W/win), n_heads, K^2 * (win/S)^2, C/n_heads ->
+        x_cross = self.deheadify(x_cross)
 
-        # Combine pixel and channel summaries for context modulation
-        # B, H/K * W/K, K**2, C -> B, H, W, C
-        x_cross_context = self.reverse_window_partition(x_s * x_cross, K, H, W, with_batch=True)
+        # B, (H/win) * (W/win), (win/S)^2, C -> B, H/S, W/S, C -> B, H/S, 1, W/S, 1, C
+        x_cross = self.reverse_window_partition(x_cross, self.win, H, W) #.view(B, H_S, 1, W_S, 1, C)
 
-        x_cross_context = self.out_conv(x_cross_context)
+        # B, H/S, 1, W/S, 1, C -> B, H/S, S, W/S, S, C -> B, H, W, C
+        # x_cross = x_cross.expand(-1, -1,  self.summary_size, -1, self.summary_size,  -1).reshape(B, H, W, C)
 
-        return x_wsa + self.rezero * x_cross_context
+        return self.rezero * self.out_proj(x_cross)
 
 
 class WindowedMSA(WindowedAttention):
@@ -244,12 +204,12 @@ class WindowedMSA(WindowedAttention):
         self.attn_drop = attn_drop
 
         self.qkv = nn.Linear(dim, 3 * dim)
-        self.context_ca = WindowedContextCA(window_size, dim)
-
-        self.pe_encoder = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim)
-
+        self.pe = RelativePositionalEncoding(q_size=self.win, k_size=self.win, num_heads=num_heads)
         self.out_proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
+        self.norm = nn.LayerNorm(dim)
+
+        self.context_ca = WindowedContextCA(window_size, dim, num_heads=num_heads)
+        self.drop = nn.Dropout(proj_drop)
 
     def forward(self, x):
         B, H, W, C = x.shape
@@ -257,112 +217,47 @@ class WindowedMSA(WindowedAttention):
         # B, H, W, C -> N, win^2, C
         z = self.window_partition(x, self.win)
         qkv = self.qkv(z)
-        q, k, v = qkv.chunk(3, dim=-1)
+        q, k, v = self.headify(qkv).chunk(3, dim=-1)
 
-        lepe = self.locally_enhanced_PE(v)
-        q, k, v, lepe = self.headify(q, k, v, lepe)
+        z = nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=self.pe(), dropout_p=self.attn_drop)
 
-        z = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop) + lepe
+        z = self.norm(self.reverse_window_partition(self.out_proj(self.deheadify(z)), self.win, H, W))
 
-        # N, n_heads, W, C // n_heads -> B, H, W, C
-        z = self.reverse_window_partition(self.deheadify(z), self.win, H, W)
+        z = z + self.context_ca(z, x)
 
-        z = self.context_ca(z, x)
-
-        z = self.out_proj(z)
-        z = self.proj_drop(z)
+        z = self.drop(z)
         return z
 
 
 class ViTBlock(nn.Module):
-    def __init__(self, window_size, dim, levels, n_heads=4, ffn_scale=2, drop_path=0.0):
+    def __init__(self, window_size, dim, n_heads=4, ffn_scale=2, drop_path=0.0):
         super().__init__()
         self.wmsa = WindowedMSA(dim=dim, window_size=window_size, num_heads=n_heads)
         self.mlp = MLP(dim, ffn_scale=ffn_scale)
         self.ln1 = nn.LayerNorm(dim)
         self.ln2 = nn.LayerNorm(dim)
         self.drop_path = nn.Dropout(drop_path)
-
-    def forward(self, x):
-        # B, C, H, W -> B, H, W, C
-        x = x.permute(0, 2, 3, 1).contiguous()
-
-        x = self.drop_path(self.wmsa(self.ln1(x))) + x
-        x = self.drop_path(self.mlp(self.ln2(x))) + x
-
-        # B, H, W, C -> B, C, H, W
-        x = x.permute(0, 3, 1, 2).contiguous()
-        return x
-
-
-class MSFBlock_3(nn.Module):
-    def __init__(self, levels, window_size, dim, level_dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.0):
-        super().__init__()
-        self.fuse = ViTBlock(window_size, dim, levels, n_heads=n_heads_fuse, ffn_scale=ffn_scale, drop_path=drop_path)
         self.rezero = nn.Parameter(torch.zeros(1))
 
     def forward(self, x):
-        return x + self.rezero * self.fuse(x)
+        x = self.drop_path(self.wmsa(self.ln1(x))) + x
+        x = self.drop_path(self.mlp(self.ln2(x))) + x
+        return x
 
 class ResidualBlock(nn.Module):
     def __init__(self, n_sub_blocks, levels, window_size, dim, level_dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.):
         super().__init__()
-        self.layers = nn.Sequential(*[MSFBlock_3(
-            levels=levels,
-            level_dim=level_dim,
-            dim=dim,
+        self.layers = nn.Sequential(*[ViTBlock(
             window_size=window_size,
+            dim=dim,
             n_heads=n_heads,
-            n_heads_fuse=n_heads_fuse,
             ffn_scale=ffn_scale,
             drop_path=drop_path) for _ in range(n_sub_blocks)])
 
-        self.out_layer = nn.Conv2d(dim, dim, 3, 1, 1)
+        self.out_layer = LastChannelConv2D(dim, dim, 3, 1, 1)
 
     def forward(self, x):
         return self.out_layer(self.layers(x)) + x
-
-class DenseResidualBlock(nn.Module):
-    def __init__(self, n_sub_blocks, levels, window_size, dim, n_heads, n_heads_fuse, ffn_scale=2, drop_path=0.0):
-        super().__init__()
-        self.n_sub_blocks = n_sub_blocks
-        self.layers = nn.ModuleList([MSFBlock_3(
-            levels=levels,
-            dim=dim,
-            window_size=window_size,
-            n_heads=n_heads,
-            n_heads_fuse=n_heads_fuse,
-            ffn_scale=ffn_scale,
-            drop_path=drop_path) for _ in range(n_sub_blocks)])
-
-        self.alpha = nn.ParameterList([nn.Parameter(torch.tensor(0.2)) for _ in range(self.n_sub_blocks)])
-
-        self.fuse = nn.ModuleList([
-            nn.Sequential(nn.Conv2d(dim*(i+1), dim, 3, 1, 1), nn.LeakyReLU(negative_slope=0.2)) for i in range(self.n_sub_blocks)
-        ])
-
-        self.out_layer = nn.Sequential(
-            MSFBlock_3(
-                levels=levels,
-                dim=dim,
-                window_size=window_size,
-                n_heads=n_heads,
-                n_heads_fuse=n_heads_fuse,
-                ffn_scale=ffn_scale,
-                drop_path=drop_path),
-            nn.Conv2d(dim, dim, 3, 1, 1)
-        )
-
-    def forward(self, x):
-        residuals_list = [x]
-
-        for i in range(self.n_sub_blocks):
-            x = self.layers[i](x)
-            residual = self.fuse[i](torch.cat(residuals_list, dim=1))
-            x += self.alpha[i] * residual
-            residuals_list.append(x)
-
-        return self.out_layer(x)
 
 
 class MSFTransformer(nn.Module):
@@ -415,7 +310,7 @@ class MSFTransformer(nn.Module):
                     ffn_scale=ffn_scale,
                     drop_path=drop_path) for _ in range(n_blocks)])
 
-        self.feature_transition = nn.Conv2d(dim, dim, 3, 1, 1)
+        self.feature_transition = LastChannelConv2D(dim, dim, 3, 1, 1)
 
         img_reconstruction = [
             nn.Conv2d(dim, feature_dim, 3, 1, 1),
@@ -476,8 +371,11 @@ class MSFTransformer(nn.Module):
         x = self.padding(x)
 
         x = self.feature_extractor(x)
-
+        # B, C, H, W -> B, H, W, C
+        x = x.permute(0, 2, 3, 1).contiguous()
         x = self.feature_transition(self.layers(x)) + x
+        # B, H, W, C -> B, C, H, W
+        x = x.permute(0, 3, 1, 2).contiguous()
 
         x = self.img_reconstruction(x)
 

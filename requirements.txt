@@ -6,4 +6,5 @@ wandb
 timm
 kornia
 gdown
+ninja
 flash-attn
