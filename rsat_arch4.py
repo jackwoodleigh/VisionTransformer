@@ -30,9 +30,9 @@ class ChannelLayerNorm(nn.Module):
         return x
 
 class LastChannelConv2D(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, groups=1, dilation=1):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, groups=1):
         super().__init__()
-        self.conv = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation, groups=groups)
+        self.conv = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride, padding=padding, groups=groups)
 
     def forward(self, x):
         # x: B, H, W, C
@@ -79,11 +79,11 @@ class PatchMerging(nn.Module):
         return x
 
 class RelativePositionalEncoding(nn.Module):
-    def __init__(self, q_size, k_size, num_heads=1):
+    def __init__(self, q_size, k_size, num_heads=1, scale=1):
         super().__init__()
         assert q_size <= k_size
         self.relative_position_bias_table = nn.Parameter(torch.zeros((2 * k_size - 1) * (2 * k_size - 1), num_heads))
-
+        self.scale = scale
         coords = torch.stack(torch.meshgrid(torch.arange(k_size), torch.arange(k_size), indexing='ij'), dim=0)
 
         start = (k_size - q_size) // 2
@@ -98,7 +98,7 @@ class RelativePositionalEncoding(nn.Module):
         trunc_normal_(self.relative_position_bias_table, std=.02)
 
     def forward(self):
-        bias = self.relative_position_bias_table[self.relative_position_index]
+        bias = self.scale * self.relative_position_bias_table[self.relative_position_index]
         bias = bias.permute(2, 0, 1).contiguous().unsqueeze(0)
         return bias
 
@@ -154,14 +154,27 @@ class WindowedContextCA(WindowedAttention):
         self.kernal_size = 3
         self.win_s = window_size // self.summary_size
 
-        self.kv_proj = LastChannelConv2D(in_channels=dim, out_channels=2 * dim, kernel_size=5, padding=2, groups=num_heads)
-        self.q_proj = nn.Linear(dim, dim)
+        self.kv_proj = LastChannelConv2D(dim, 2*dim, 3, 1, 1, groups=num_heads)
+        self.q_proj = LastChannelConv2D(dim, dim, 3, 1, 1, groups=num_heads)
 
-        self.pe = RelativePositionalEncoding(q_size=self.win, k_size=self.win, num_heads=num_heads)
+        self.k_sum = LastChannelConv2D(dim, dim, 3, 3, 1, groups=num_heads)
+        self.v_sum = LastChannelConv2D(dim, dim, 3, 3, 1, groups=num_heads)
 
+        self.unfold = nn.Unfold(kernel_size=(self.kernal_size * self.win, self.kernal_size * self.win), stride=self.win, padding=self.win)
+
+        self.pe = RelativePositionalEncoding(q_size=self.win, k_size=self.win, num_heads=num_heads, scale=self.kernal_size)
         self.out_proj = nn.Linear(dim, dim)
-        #self.out_conv = LastChannelConv2D(dim, dim, 3, 1, 1, groups=num_heads)
-        self.rezero = nn.Parameter(torch.zeros(1))
+
+    def overlapping_windows(self, x):
+        # Input shape: B, H, W, C
+        # Output shape: B, H/win * W/win, 9*win^2, C
+        B, H, W, C = x.shape
+        x = x.permute(0, 3, 1, 2)
+        x = self.unfold(x)
+
+        # B, C * K^2 * win^2, H/win * W/win -> B, C, K^2 * win^2, H/win * W/win -> B, H/win * W/win, K^2 * win^2, C
+        x = x.view(B, C, self.kernal_size**2 * self.win**2, -1).permute(0, 3, 2, 1).contiguous()
+        return x
 
     def forward(self, x_wsa, x_original):
         # x_wsa: B, H, W, C
@@ -173,27 +186,22 @@ class WindowedContextCA(WindowedAttention):
         S = self.summary_size
         H_S, W_S = H // S, W // S
 
-        # B, H, W, C -> B, H/S, W/S, C -> B * H/win * W/win, (win/S)^2, C
+        # B, H, W, C -> B, H/S, W/S, C -> B * H/win * W/win, win^2, C
         q = self.window_partition(self.q_proj(x_wsa), self.win)
 
-        # B, H, W, C -> B * H/win * W/win, win^2, C
-        k, v = self.window_partition(self.kv_proj(x_original), self.win).chunk(2, dim=-1)
+        # B, H, W, C -> B * (H/win) * (W/win), K * win, K * win, 2*C -> B * (H/win) * (W/win), win^2, C
+        k, v = self.overlapping_windows(self.kv_proj(x_original)).view(-1, self.win * self.kernal_size, self.win * self.kernal_size, 2*C).chunk(2, dim=-1)
+        k, v = self.k_sum(k).view(q.shape), self.v_sum(v).view(q.shape)
 
-        # B * (H/win) * (W/win), (win/S)^2, C -> B * (H/win) * (W/win), n_heads, K^2 * (win/S)^2, C/n_heads
+        # B * (H/win) * (W/win), win^2, C -> B * (H/win) * (W/win), n_heads, win^2, C/n_heads
         q, k, v = self.headify(q, k, v)
 
         x_cross = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=self.pe())
 
-        # B * (H/win) * (W/win), n_heads, K^2 * (win/S)^2, C/n_heads ->
-        x_cross = self.deheadify(x_cross)
+        # B * (H/win) * (W/win), n_heads, win^2, C/n_heads -> B, (H/win) * (W/win), win^2, C -> B, H, W, C
+        x_cross = self.reverse_window_partition(self.deheadify(x_cross), self.win, H, W, with_batch=True)
 
-        # B, (H/win) * (W/win), (win/S)^2, C -> B, H/S, W/S, C -> B, H/S, 1, W/S, 1, C
-        x_cross = self.reverse_window_partition(x_cross, self.win, H, W) #.view(B, H_S, 1, W_S, 1, C)
-
-        # B, H/S, 1, W/S, 1, C -> B, H/S, S, W/S, S, C -> B, H, W, C
-        # x_cross = x_cross.expand(-1, -1,  self.summary_size, -1, self.summary_size,  -1).reshape(B, H, W, C)
-
-        return self.rezero * self.out_proj(x_cross)
+        return self.out_proj(x_cross)
 
 
 class WindowedMSA(WindowedAttention):
@@ -208,24 +216,13 @@ class WindowedMSA(WindowedAttention):
         self.out_proj = nn.Linear(dim, dim)
         self.norm = nn.LayerNorm(dim)
 
-        self.context_ca = WindowedContextCA(window_size, dim, num_heads=num_heads)
-        self.drop = nn.Dropout(proj_drop)
-
     def forward(self, x):
         B, H, W, C = x.shape
-
-        # B, H, W, C -> N, win^2, C
         z = self.window_partition(x, self.win)
         qkv = self.qkv(z)
         q, k, v = self.headify(qkv).chunk(3, dim=-1)
-
         z = nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=self.pe(), dropout_p=self.attn_drop)
-
-        z = self.norm(self.reverse_window_partition(self.out_proj(self.deheadify(z)), self.win, H, W))
-
-        z = z + self.context_ca(z, x)
-
-        z = self.drop(z)
+        z = self.reverse_window_partition(self.out_proj(self.deheadify(z)), self.win, H, W)
         return z
 
 
@@ -233,15 +230,21 @@ class ViTBlock(nn.Module):
     def __init__(self, window_size, dim, n_heads=4, ffn_scale=2, drop_path=0.0):
         super().__init__()
         self.wmsa = WindowedMSA(dim=dim, window_size=window_size, num_heads=n_heads)
+        self.rsa = WindowedContextCA(window_size, dim, num_heads=n_heads)
         self.mlp = MLP(dim, ffn_scale=ffn_scale)
         self.ln1 = nn.LayerNorm(dim)
         self.ln2 = nn.LayerNorm(dim)
+        self.ln3 = nn.LayerNorm(dim)
         self.drop_path = nn.Dropout(drop_path)
-        self.rezero = nn.Parameter(torch.zeros(1))
+        self.rezero_wmsa = nn.Parameter(torch.zeros(1))
+        self.rezero_rsa = nn.Parameter(torch.zeros(1))
+        self.rezero_mlp = nn.Parameter(torch.zeros(1))
 
     def forward(self, x):
-        x = self.drop_path(self.wmsa(self.ln1(x))) + x
-        x = self.drop_path(self.mlp(self.ln2(x))) + x
+        x_origin = self.ln1(x)
+        x = x + self.rezero_wmsa * self.drop_path(self.wmsa(x_origin))
+        x = x + self.rezero_rsa * self.drop_path(self.rsa(self.ln2(x), x_origin))
+        x = x + self.rezero_mlp * self.drop_path(self.mlp(self.ln3(x)))
         return x
 
 class ResidualBlock(nn.Module):
@@ -287,16 +290,7 @@ class MSFTransformer(nn.Module):
 
         self.feature_extractor = nn.Conv2d(3, dim, 3, 1, 1)
         if block_type != "default":
-            self.layers = nn.Sequential(*[
-                DenseResidualBlock(
-                    n_sub_blocks=n_sub_blocks,
-                    levels=levels,
-                    dim=dim,
-                    window_size=window_size,
-                    n_heads=n_heads,
-                    n_heads_fuse=n_heads_fuse,
-                    ffn_scale=ffn_scale,
-                    drop_path=drop_path) for _ in range(n_blocks)])
+            pass
         else:
             self.layers = nn.Sequential(*[
                 ResidualBlock(
