@@ -1,15 +1,13 @@
 
-Thus far, this project has been aimed at improving windowed vision transformers' ability to understand greater global context, within the scope of image resoration. The Swin Transforemr has been very successful in tackeling this problem by simply switching between two alternating windows, however, many models have improved on its weaknesses and achieved better results. I started this project to learn and develop an intuitive understanding of architecture design by implement and experimenting with various methodolgies from papers I found interesting. It is still on-going and something I work on in my free time. 
-
+Thus far, this project has been aimed at improving windowed vision transformers' ability to understand greater global context, within the scope of image restoration. The Swin Transforemr has been very successful in tackling this problem by simply switching between two alternating windows, however, many models have improved on its weaknesses and achieved better results. I started this project to learn and develop an intuitive understanding of architecture design by implementing and experimenting with various methodologies from papers I found interesting. It is still on-going and I occasionally work on it in my free time. 
 
 # Models
 
-These models both comprises three key stages. An inital shallow feature extraction module employs convolutional layers to capture basic image features. These features are then passed to the deep feature extraction stage, which is made up of a series of resitual blocks containing vision transformer layers that are responsible for mapping low-quality features to high-quality features. The vision transformer layers are they sole source of variation between these models. Finally, using a series of convolutional layers, the model reconstructs the image at an enhanced resolution. 
-
+These models both comprise three key stages. An initial shallow feature extraction module employs convolutional layers to capture basic image features. These features are then passed to the deep feature extraction stage, which is made up of a series of residual blocks containing vision transformer layers that are responsible for mapping low-quality features to high-quality features. The vision transformer layers are the sole source of variation between these models. Finally, using a series of convolutional layers, the model reconstructs the image at an enhanced resolution. 
 
 ## MSFT 
 
-This model attempts to overcome windowed-attention's limited ability to capture context beyond the scope of its individual window, attention is preformed at multiple spatial resolutions. With this approach, lower spatial resolutions windows take up a larger portion of the total image. This means that attention computed on a larger portion of the image can provide context of global structural detail to modify local fine-grain detail. 
+This model attempts to overcome windowed-attention's limited ability to capture context beyond the scope of its individual window, attention is performed at multiple spatial resolutions. With this approach, lower spatial resolutions windows take up a larger portion of the total image. This means that attention computed on a larger portion of the image can provide context of global structural detail to modify local fine-grain detail. 
 
 ### Outdated results and visuals from ~4/15/2025 of MSFT that were used for my senior project
 
@@ -28,8 +26,5 @@ This model attempts to overcome windowed-attention's limited ability to capture 
 
 ## RSMT - In Progress
 
-This is very much still in progress with different variations that do different things. Currently, this model preforms normal windowed multi-head attention but modulate the output using a convolutional cross attention approach to incorperates neighboring windows. To mitigate the additional complexity this would add in attention, sub-regions within the windows are converted into summaries using convolutional layers, reducing the total size. 
-
-I have experimented with converting the output of WMSA to regional summaries, preforming cross attention with the neighboring windows, and using a convolutional layer to find  
-
+This is very much still in progress with different variations that do different things. Currently, to incorporate information from neighboring windows, this model aims to modulate the output of normal windowed multi-head attention using a convolutional cross attention approach. To mitigate the significant complexity this would add, images are converted into summaries of sub-regions using convolutional layers, reducing the total size.
 
