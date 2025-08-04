@@ -11,7 +11,7 @@ This model attempts to overcome windowed-attention's limited ability to capture 
 
 ### Outdated results and visuals from ~4/15/2025 of MSFT that were used for my senior project
 
-#### Architecture 
+#### Architecture (Not final version)
 ![arch](https://github.com/jackwoodleigh/VisionTransformer/blob/main/Attachments/Group%201.png)
 
 #### Ground Truth / Bicubic / Ours
