@@ -1,9 +1,9 @@
 model:
   scale_factor: 4
   block_type: "default"
-  n_blocks: 4
-  n_sub_blocks: 4
-  levels: 3
+  n_blocks: 8
+  n_sub_blocks: 3
+  levels: 1
   dim: 180
   level_dim: 96
   n_heads: 6
@@ -13,8 +13,8 @@ model:
 
 
 training:
-  learning_rate: 0.00015
-  batch_size_per_gpu: 4
+  learning_rate: 0.0002
+  batch_size_per_gpu: 2
   accumulation_steps: 1
   iterations: 500000
   epochs: 100
