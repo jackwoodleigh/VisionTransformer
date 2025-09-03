@@ -171,7 +171,7 @@ class WindowedAttention(nn.Module):
     def attention(self, q, k, v, C, attn_drop=0., pe=0):
         return F.dropout(((q @ k.transpose(-2, -1)) * (C // self.num_heads) ** -0.5 + pe).softmax(dim=-1), p=attn_drop, training=self.training) @ v
 
-class SparseDynamicWindowAttention(WindowedAttention):
+class DeformableSparseWindowAttention(WindowedAttention):
     def __init__(self, window_size, dim, num_heads):
         super().__init__(window_size, dim, num_heads)
         self.temperature = 1.0
@@ -341,7 +341,7 @@ class ViTBlock(nn.Module):
     def __init__(self, window_size, dim, n_heads=4, ffn_scale=2, drop_path=0.0):
         super().__init__()
         self.wmsa = WindowedMSA(dim=dim, window_size=window_size, num_heads=n_heads)
-        self.sdwa = SparseDynamicWindowAttention(window_size, dim, num_heads=n_heads)
+        self.sdwa = DeformableSparseWindowAttention(window_size, dim, num_heads=n_heads)
         self.mlp1 = MLP(dim, ffn_scale=ffn_scale)
         self.ln1 = nn.RMSNorm(dim)
         self.ln2 = nn.RMSNorm(dim)
