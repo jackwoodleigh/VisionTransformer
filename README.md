@@ -14,8 +14,9 @@ The idea behind DS-MSA, which builds upon concepts from DAT, introduces a deform
 
 A key challenge in this architecture comes from the series of discrete choices it must make. Currently, I am first selecting candidate windows based on their score using TopK with a gumbel softmax, to help with exploration, and a straight through estimator to allow the gradient to flow through. I finalize the selection of candidate windows by hard selecting based on their predicted gate value and use another straight through estimator to enable gradient flow. Their indices, with the offsets, are plugged in to torch vision’s roi_align and attention is computed on the selected regions. This function utilizes bilinear interpolation, which allows gradients to flow back to the offset predictions. Finally, scatter_add is used with a mean reduction to modify the original input with the delta difference of attention. 
 
+**Benchmark comparison on 4x image restoration using DIV2K+Flickr2K with PSNR and SSIM scores.**
 
-|      Method      |   Urban100    | 
+|      Method      |   Urban100     | 
 |------------------|----------------|
 | DSWT             | 27.02 / 0.8200 | 
 | SwinIR           | 27.45 / 0.8254 | 
@@ -23,7 +24,6 @@ A key challenge in this architecture comes from the series of discrete choices i
 | HAT (uses Swin)  | 27.97 / 0.8368 | 
 | DRCT (uses Swin) | 28.06 / 0.8378 | 
 
-Table showing models trained on image restoration using DIV2K+Flickr2K. Models were benchmarked using 4x image restoration with PSNR and SSIM scores. 
 
 While DSWT does not yet match the performance of either Swin model, I am personally encouraged by the results being fairly close since this project is fairly new. It currently has 37.5% less attention calls than Swin because at a bare-minimum Swin needs two attention calls per blocks while DSWT requires an average of 1.25 attention calls in its current configuration. I am hopeful that in the future I’ll find a way to match or beat Swin's performance.
 
