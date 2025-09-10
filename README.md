@@ -22,6 +22,7 @@ A key challenge in this architecture comes from the series of discrete choices i
 | Swin2SR          | 27.51 / 0.8274 | 
 | HAT (uses Swin)  | 27.97 / 0.8368 | 
 | DRCT (uses Swin) | 28.06 / 0.8378 | 
+
 Table showing models trained on image restoration using DIV2K+Flickr2K. Models were benchmarked using 4x image restoration with PSNR and SSIM scores. 
 
 While DSWT does not yet match the performance of either Swin model, I am personally encouraged by the results being fairly close since this project is fairly new. It currently has 37.5% less attention calls than Swin because at a bare-minimum Swin needs two attention calls per blocks while DSWT requires an average of 1.25 attention calls in its current configuration. I am hopeful that in the future I’ll find a way to match or beat Swin's performance.
